@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     no_trade_after_launch_seconds: int = 300
     paper_trade_size_usd: float = 50.0
 
+    # ── Risk Manager (Phase 3) ──────────────────────────────────────────────
+    risk_max_trade_size_usd: float = 100.0      # Max per transaction
+    risk_max_concurrent_positions: int = 5      # Max open positions
+    risk_max_daily_loss_usd: float = 500.0      # Daily realized loss limit
+    risk_max_slippage_bps: int = 200            # Max acceptable slippage (2%)
+    risk_min_liquidity_usd: float = 10_000.0    # Min market liquidity
+    risk_require_wallet_link: bool = True       # Gate trading on wallet link
+    risk_require_trading_enabled: bool = True   # Gate trading on user opt-in
+
     # ── Wallet (live trading only) ─────────────────────────────────────────
     wallet_private_key: SecretStr | None = None
     wallet_address: str | None = None

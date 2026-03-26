@@ -39,6 +39,7 @@ from app.db.repositories.creator_tracking import TrackedCreatorRepository
 from app.db.repositories.signals import SignalRepository
 from app.db.repositories.positions import PaperPositionRepository
 from app.db.repositories.coins import ZoraCoinRepository, CoinMarketSnapshotRepository
+from app.risk import check_trade_allowed
 from app.services.wallet_linking import create_link_session
 
 log = logging.getLogger(__name__)
@@ -318,12 +319,43 @@ class ToolExecutor:
         }
 
     async def execute_trade(self, args: dict) -> dict:
-        """Execute a real trade (gated by wallet linking + trading enabled)."""
-        # For Phase 2, this is still gated — full implementation in Phase 3
+        """Execute a real trade (gated by risk controls and wallet linking)."""
+        coin_symbol = args.get("coin_symbol", "").strip()
+        action = args.get("action", "buy").lower()
+        amount_usd = float(args.get("amount_usd", 0))
+
+        if not all([coin_symbol, action, amount_usd]):
+            return {"success": False, "error": "coin_symbol, action, amount_usd required"}
+
+        if action not in ("buy", "sell"):
+            return {"success": False, "error": f"Invalid action: {action}"}
+
+        # Phase 3: Run comprehensive risk checks
+        risk_check = await check_trade_allowed(
+            session=self.session,
+            telegram_user_id=self.telegram_user_id,
+            coin_symbol=coin_symbol,
+            action=action,
+            amount_usd=amount_usd,
+            slippage_bps=150,  # Default estimate
+        )
+
+        if not risk_check.allowed:
+            return {
+                "success": False,
+                "error": risk_check.reason,
+                "blocked_reason": "risk_check_failed",
+            }
+
+        # TODO: Phase 3+ - Actually execute trade to smart contract
+        # For now, just indicate it would execute
         return {
-            "success": False,
-            "error": "Live trading requires wallet linking. Use start_wallet_link first.",
-            "next_steps": ["Call start_wallet_link to connect wallet", "Enable trading", "Try again"],
+            "success": True,
+            "message": f"✅ Trade would execute (Phase 3 implementation pending)\n"
+            f"Action: {action.upper()}\n"
+            f"Coin: {coin_symbol}\n"
+            f"Amount: ${amount_usd}",
+            "status": "pending_execution",
         }
 
     # ── Wallet Linking ────────────────────────────────────────────────────────
