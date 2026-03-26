@@ -26,11 +26,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
 
+    data = query.data or ""
+    
+    # Route to different handlers based on callback data prefix
+    # AI trading buttons use pipe-separated format: "action|param=value|param2=value2"
+    # Admin buttons use colon format: "action:signal_id"
+    
+    # Check for AI trading button callbacks first
+    if "|" in data:
+        # AI trading/wallet button
+        from app.bot.inline_buttons import generic_callback_handler as ai_callback_handler
+        # Re-answer since we already answered above
+        await ai_callback_handler(update, context)
+        return
+    
+    # Legacy admin callbacks (approval, ignore, refresh)
+    if ":" not in data:
+        log.warning("unknown_callback_format", data=data)
+        return
+    
+    # Admin-only callbacks
     if not await check_admin(update, context):
         await query.answer("⛔ Not authorised.", show_alert=True)
         return
 
-    data = query.data or ""
     parts = data.split(":", 1)
     if len(parts) != 2:
         log.warning("unknown_callback", data=data)

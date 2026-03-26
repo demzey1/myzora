@@ -50,10 +50,14 @@ class AssistantResponse:
         text: str,
         tool_calls: list[dict[str, Any]] | None = None,
         error: str | None = None,
+        tools_executed: list[str] | None = None,
+        inline_buttons_data: dict[str, Any] | None = None,
     ):
         self.text = text
         self.tool_calls = tool_calls or []
         self.error = error
+        self.tools_executed = tools_executed or []  # List of tool names that were called
+        self.inline_buttons_data = inline_buttons_data or {}  # Data for generating buttons
 
 
 # ── Assistant orchestration ────────────────────────────────────────────────────
@@ -103,6 +107,7 @@ async def send_message_to_assistant(
 
         # Iterate until completion or max iterations
         iteration = 0
+        tools_executed_list: list[str] = []
         while iteration < max_iterations:
             iteration += 1
 
@@ -114,7 +119,10 @@ async def send_message_to_assistant(
                 messages = await client.get_thread_messages(thread_id, limit=1)
                 response_text = _extract_message_text(messages["data"][0])
                 await update_conversation_timestamp(telegram_user_id)
-                return AssistantResponse(text=response_text)
+                return AssistantResponse(
+                    text=response_text,
+                    tools_executed=tools_executed_list,
+                )
 
             elif run["status"] == "requires_action":
                 # Extract tool calls
@@ -126,7 +134,9 @@ async def send_message_to_assistant(
                     log.warning("requires_action but no tool_calls", run_id=run_id)
                     break
 
-                # Execute tools (stub — will be wired in Phase 2)
+                # Execute tools and track which ones are called
+                tools_called = [tc["function"]["name"] for tc in tool_calls]
+                tools_executed_list.extend(tools_called)
                 tool_results = await _execute_tools(tool_calls, telegram_user_id)
 
                 # Submit results and continue

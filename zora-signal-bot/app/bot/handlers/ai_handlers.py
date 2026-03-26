@@ -20,8 +20,14 @@ from app.logging_config import get_logger
 log = get_logger(__name__)
 
 
-async def _reply(update: Update, text: str, **kw) -> None:  # type: ignore[no-untyped-def]
-    await update.message.reply_text(text, parse_mode="HTML", **kw)
+async def _reply(update: Update, text: str, reply_markup=None, **kw) -> None:  # type: ignore[no-untyped-def]
+    """Reply with text, optionally with inline buttons."""
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        **kw,
+    )
 
 
 # ── Free-text message handler ─────────────────────────────────────────────────
@@ -32,6 +38,7 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     Routes to OpenAI Responses API for multi-turn chat with tool support.
     
     Accepts messages from any user (not admin-only).
+    Tool responses may include inline buttons for actions (Buy, Cancel, Close Position, etc).
     """
     if not update.message or not update.message.text:
         return
@@ -54,6 +61,10 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Send to assistant
     from app.bot.assistant import send_message_to_assistant
+    from app.bot.inline_buttons import (
+        make_trade_preview_buttons,
+        make_wallet_link_button,
+    )
 
     try:
         response = await send_message_to_assistant(user_id, text)
@@ -61,7 +72,27 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if response.error:
             await _reply(update, f"❌ {response.error}")
         else:
-            await _reply(update, response.text)
+            # Add buttons if certain tools were executed
+            reply_markup = None
+            
+            if "preview_trade" in response.tools_executed:
+                # Try to extract trade parameters from response text
+                # This is a simple heuristic - a more robust approach would
+                # pass structured data through the response
+                if "buy" in response.text.lower() or "sell" in response.text.lower():
+                    action = "buy" if "buy" in response.text.lower() else "sell"
+                    # Attempt to extract coin symbol and amount (simplified)
+                    reply_markup = make_trade_preview_buttons("UNKNOWN", action, 0)
+            
+            elif "start_wallet_link" in response.tools_executed:
+                # Extract wallet link URL from response text
+                import re
+                url_match = re.search(r'(https?://\S+)', response.text)
+                if url_match:
+                    wallet_url = url_match.group(1)
+                    reply_markup = make_wallet_link_button(wallet_url)
+            
+            await _reply(update, response.text, reply_markup=reply_markup)
 
     except Exception as exc:
         log.exception("handle_free_text_error", exc_info=True)
