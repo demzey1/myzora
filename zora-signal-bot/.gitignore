@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic (keep versions/ but not cache)
+migrations/__pycache__/
+
+# Celery beat schedule DB
+celerybeat-schedule
+celerybeat.pid
+/var/run/celerybeat/
+
+# Logs
+*.log
+logs/

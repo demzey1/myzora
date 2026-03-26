@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]" aiosqlite respx
+
+      - name: Run linter (ruff)
+        run: ruff check app/ tests/
+
+      - name: Run type checker (mypy) — non-blocking
+        run: mypy app/ --ignore-missing-imports || true
+
+      - name: Run tests with coverage
+        env:
+          APP_ENV: development
+          APP_SECRET_KEY: ci-secret-key-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+          TELEGRAM_BOT_TOKEN: "0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+          TELEGRAM_ADMIN_USER_IDS: "12345"
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          REDIS_URL: "redis://localhost:6379/0"
+          CELERY_BROKER_URL: "redis://localhost:6379/1"
+          CELERY_RESULT_BACKEND: "redis://localhost:6379/2"
+          LIVE_TRADING_ENABLED: "false"
+          PAPER_TRADING_ENABLED: "true"
+        run: |
+          pytest \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=60 \
+            -v \
+            -x
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --target runtime -t zora-signal-bot:ci .
+
+      - name: Smoke-test health endpoint
+        run: |
+          docker run -d \
+            --name zsb-smoke \
+            -p 8000:8000 \
+            -e APP_ENV=development \
+            -e APP_SECRET_KEY=ci-smoke-key-64-chars-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+            -e TELEGRAM_BOT_TOKEN="0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+            -e TELEGRAM_ADMIN_USER_IDS="12345" \
+            -e DATABASE_URL="sqlite+aiosqlite:///./smoke_test.db" \
+            -e REDIS_URL="redis://localhost:6379/0" \
+            -e CELERY_BROKER_URL="redis://localhost:6379/1" \
+            -e CELERY_RESULT_BACKEND="redis://localhost:6379/2" \
+            zora-signal-bot:ci
+          # Give the app a few seconds to start
+          sleep 8
+          curl -sf http://localhost:8000/health || (docker logs zsb-smoke && exit 1)
+          docker stop zsb-smoke
