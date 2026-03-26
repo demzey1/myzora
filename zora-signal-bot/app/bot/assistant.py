@@ -199,16 +199,25 @@ async def _execute_tools(
     telegram_user_id: int,
 ) -> list[tuple[str, str]]:
     """
-    Execute tool calls and return list of (tool_call_id, result_json_str).
+    Execute tool calls using real domain services (Phase 2).
 
-    For Phase 1, this is a stub that returns placeholder results.
-    In Phase 2, this will call the actual domain services.
+    Imports and calls the ToolExecutor from app.bot.tools.
+    Each tool is wired to backend services:
+      - Creator tracking → TrackedCreatorRepository
+      - Signals → SignalRepository + ScoringEngine
+      - Trading → TradeExecutionService + RiskManager
+      - Wallet linking → WalletLinkingService
+      - Preferences → UserPreferences repository
 
-    TODO in Phase 2:
-      - Wire up service layer calls
-      - Call track_creator, get_zora_signals, etc
-      - Return real results or errors
+    Args:
+        tool_calls: List of tool call objects from OpenAI
+        telegram_user_id: User ID for context
+
+    Returns:
+        List of (tool_call_id, result_json_str) tuples for submission back to OpenAI
     """
+    from app.bot.tools import execute_tool
+
     results = []
 
     for tool_call in tool_calls:
@@ -219,7 +228,7 @@ async def _execute_tools(
         try:
             tool_args = json.loads(tool_args_str)
         except json.JSONDecodeError:
-            result_obj = {"error": "Invalid JSON in tool arguments"}
+            result_obj = {"success": False, "error": "Invalid JSON in tool arguments"}
             results.append((tool_call_id, json.dumps(result_obj)))
             continue
 
@@ -230,88 +239,19 @@ async def _execute_tools(
             telegram_user_id=telegram_user_id,
         )
 
-        # Stub implementations for Phase 1
-        # These will be replaced with real service calls in Phase 2
-        if tool_name == "track_creator":
-            result_obj = {
-                "success": True,
-                "message": f"Now tracking {tool_args.get('x_username')} in {tool_args.get('mode', 'hybrid')} mode",
-            }
-        elif tool_name == "list_tracked_creators":
-            result_obj = {
-                "success": True,
-                "creators": [
-                    {"name": "@vitalik", "mode": "hybrid"},
-                ],
-            }
-        elif tool_name == "get_zora_signals":
-            result_obj = {
-                "success": True,
-                "signals": [
-                    {"id": 1, "coin": "TEST", "score": 78, "recommendation": "ALERT"},
-                ],
-            }
-        elif tool_name == "explain_signal":
-            result_obj = {
-                "success": True,
-                "explanation": "This signal scored high due to strong engagement and creator linkage.",
-            }
-        elif tool_name == "get_coin_market_state":
-            result_obj = {
-                "success": True,
-                "coin": tool_args.get("coin_symbol"),
-                "price_usd": 0.0234,
-                "liquidity_usd": 45000,
-                "volume_5m": 12000,
-            }
-        elif tool_name == "preview_trade":
-            result_obj = {
-                "success": True,
-                "action": tool_args.get("action"),
-                "coin": tool_args.get("coin_symbol"),
-                "amount_usd": tool_args.get("amount_usd"),
-                "estimated_price": 0.0234,
-                "estimated_slippage_bps": 150,
-                "estimated_fees": 15.00,
-            }
-        elif tool_name == "execute_trade":
-            result_obj = {
-                "success": False,
-                "error": "Wallet not linked. Use start_wallet_link first.",
-            }
-        elif tool_name == "start_wallet_link":
-            result_obj = {
-                "success": True,
-                "link": "https://example.com/wallet-link/session-token-123",
-                "message": "Open this link to securely connect your wallet",
-            }
-        elif tool_name == "check_wallet_link_status":
-            result_obj = {
-                "success": True,
-                "wallet_linked": False,
-                "trading_enabled": False,
-            }
-        elif tool_name == "get_position_status":
-            result_obj = {
-                "success": True,
-                "positions": [],
-            }
-        elif tool_name == "get_user_preferences":
-            result_obj = {
-                "success": True,
-                "preferences": {
-                    "mode": "hybrid",
-                    "risk": "medium",
-                    "trading_enabled": False,
-                },
-            }
-        elif tool_name == "update_user_preferences":
-            result_obj = {
-                "success": True,
-                "message": "Preferences updated",
-            }
-        else:
-            result_obj = {"error": f"Unknown tool: {tool_name}"}
+        # Execute the tool with real domain services
+        result_obj = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+
+        log.info(
+            "tool_call_completed",
+            tool_name=tool_name,
+            success=result_obj.get("success", False),
+            telegram_user_id=telegram_user_id,
+        )
 
         results.append((tool_call_id, json.dumps(result_obj)))
 
