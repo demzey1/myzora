@@ -66,7 +66,7 @@ def _make_nonce(telegram_user_id: int, session_token: str) -> str:
 def _sign_session_token(token: str) -> str:
     """HMAC-sign a session token so the link URL can't be forged."""
     secret = settings.wallet_link_secret
-    key = secret.get_secret_value().encode() if secret else b"dev-secret-change-me"
+    key = secret.get_secret_value().encode()
     return hmac.new(key, token.encode(), hashlib.sha256).hexdigest()
 
 
@@ -265,3 +265,4 @@ async def unlink_wallet(
     await session.flush()  # type: ignore[attr-defined]
     log.info("wallet_unlinked", telegram_user_id=telegram_user_id, count=len(links))
     return True, f"Unlinked {len(links)} wallet(s)."
+

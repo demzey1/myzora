@@ -1,19 +1,6 @@
 """
 app/bot/assistant.py
-─────────────────────────────────────────────────────────────────────────────
-Assistant orchestration layer for OpenAI Responses API.
-
-Responsibilities:
-  1. Accept user message
-  2. Send to OpenAI assistant for routing/classification
-  3. Iterate on tool calls (LLM suggests, we execute, report back)
-  4. Return final response to user
-
-Design:
-  - No tool execution here (that's the services layer)
-  - Pure message iteration logic
-  - Tool execution is deferred and mocked for now
-  - In Phase 2, tool execution wiring will happen
+Assistant orchestration layer for OpenAI tool-calling chat.
 """
 
 from __future__ import annotations
@@ -33,17 +20,12 @@ from app.integrations.openai_responses_client import OpenAIResponsesClient
 
 log = logging.getLogger(__name__)
 
-
-# ── Polling constants ──────────────────────────────────────────────────────────
-
-MAX_POLL_ATTEMPTS = 30  # 5 minutes with 10s intervals
+MAX_POLL_ATTEMPTS = 30
 POLL_INTERVAL_SECONDS = 1
 
 
-# ── Response types ─────────────────────────────────────────────────────────────
-
 class AssistantResponse:
-    """Structured response from assistant after tool iteration."""
+    """Structured response returned to Telegram handlers."""
 
     def __init__(
         self,
@@ -56,106 +38,78 @@ class AssistantResponse:
         self.text = text
         self.tool_calls = tool_calls or []
         self.error = error
-        self.tools_executed = tools_executed or []  # List of tool names that were called
-        self.inline_buttons_data = inline_buttons_data or {}  # Data for generating buttons
+        self.tools_executed = tools_executed or []
+        self.inline_buttons_data = inline_buttons_data or {}
 
-
-# ── Assistant orchestration ────────────────────────────────────────────────────
 
 async def send_message_to_assistant(
     telegram_user_id: int,
     user_message: str,
     max_iterations: int = 5,
 ) -> AssistantResponse:
-    """
-    Send a user message to the assistant and iterate until completion.
-
-    Flow:
-      1. Create/get conversation thread for user
-      2. Add user message to thread
-      3. Run assistant
-      4. Poll for completion
-      5. While status is "requires_action":
-         a. Collect tool calls
-         b. Execute tools (stub for now)
-         c. Submit tool results
-         d. Run assistant again
-         e. Poll for completion
-      6. Extract final message and return
-
-    Args:
-        telegram_user_id: Telegram user ID
-        user_message: User's text input
-        max_iterations: Max tool-call iterations (safety limit)
-
-    Returns:
-        AssistantResponse with final text and any tool calls summary
-    """
+    """Send a Telegram message into the assistant loop and return the final reply."""
     try:
         client = await get_openai_client()
         assistant_id = await get_assistant_id()
-
-        # Get or create user's conversation thread
         thread_id, _ = await get_or_create_conversation_session(telegram_user_id)
 
-        # Add user message to thread
         await client.add_message(thread_id, user_message, role="user")
-
-        # Run the assistant
         run = await client.run_thread(thread_id, assistant_id)
         run_id = run["id"]
 
-        # Iterate until completion or max iterations
         iteration = 0
         tools_executed_list: list[str] = []
+        latest_tool_results: dict[str, dict[str, Any]] = {}
+
         while iteration < max_iterations:
             iteration += 1
-
-            # Poll for run completion (with backoff)
             run = await _poll_run_until_terminal(client, thread_id, run_id)
 
             if run["status"] == "completed":
-                # Extract final message
                 messages = await client.get_thread_messages(thread_id, limit=1)
                 response_text = _extract_message_text(messages["data"][0])
                 await update_conversation_timestamp(telegram_user_id)
                 return AssistantResponse(
                     text=response_text,
                     tools_executed=tools_executed_list,
+                    inline_buttons_data=_build_inline_buttons_data(latest_tool_results),
                 )
 
-            elif run["status"] == "requires_action":
-                # Extract tool calls
-                tool_calls = run.get("required_action", {}).get("submit_tool_outputs", {}).get(
-                    "tool_calls", []
+            if run["status"] == "requires_action":
+                tool_calls = (
+                    run.get("required_action", {})
+                    .get("submit_tool_outputs", {})
+                    .get("tool_calls", [])
                 )
-
                 if not tool_calls:
-                    log.warning("requires_action but no tool_calls", run_id=run_id)
+                    log.warning(f"requires_action_but_no_tool_calls run_id={run_id}")
                     break
 
-                # Execute tools and track which ones are called
                 tools_called = [tc["function"]["name"] for tc in tool_calls]
                 tools_executed_list.extend(tools_called)
                 tool_results = await _execute_tools(tool_calls, telegram_user_id)
 
-                # Submit results and continue
-                for tool_call_id, result_str in tool_results:
-                    await client.submit_tool_result(thread_id, run_id, tool_call_id, result_str)
+                for tool_result in tool_results:
+                    latest_tool_results[tool_result["tool_name"]] = tool_result["result_obj"]
+                    await client.submit_tool_result(
+                        thread_id,
+                        run_id,
+                        tool_result["tool_call_id"],
+                        tool_result["result_str"],
+                    )
 
-                # Run again
                 run = await client.run_thread(thread_id, assistant_id)
                 run_id = run["id"]
+                continue
 
-            elif run["status"] in ("failed", "cancelled", "expired"):
+            if run["status"] in ("failed", "cancelled", "expired"):
                 return AssistantResponse(
                     text=f"Assistant run failed with status: {run['status']}",
                     error=f"Run {run['status']}",
                 )
 
-            else:
-                log.warning("unexpected_run_status", status=run["status"], run_id=run_id)
-                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            log.warning(f"unexpected_run_status status={run['status']} run_id={run_id}")
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         return AssistantResponse(
             text="Assistant reached max iterations without completion",
@@ -176,27 +130,16 @@ async def _poll_run_until_terminal(
     run_id: str,
     max_attempts: int = MAX_POLL_ATTEMPTS,
 ) -> dict[str, Any]:
-    """Poll run status until terminal state or max attempts."""
-    for attempt in range(max_attempts):
+    for _ in range(max_attempts):
         run = await client.get_run_status(thread_id, run_id)
-        status = run["status"]
-
-        if status in ("completed", "requires_action", "failed", "cancelled", "expired"):
+        if run["status"] in ("completed", "requires_action", "failed", "cancelled", "expired"):
             return run
-
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-    log.warning(
-        "poll_run_timeout",
-        thread_id=thread_id,
-        run_id=run_id,
-        attempts=max_attempts,
-    )
+    log.warning(f"poll_run_timeout thread_id={thread_id} run_id={run_id} attempts={max_attempts}")
     return run
 
 
 def _extract_message_text(message: dict[str, Any]) -> str:
-    """Extract text from an OpenAI message object."""
     content = message.get("content", [])
     for block in content:
         if block.get("type") == "text":
@@ -207,28 +150,10 @@ def _extract_message_text(message: dict[str, Any]) -> str:
 async def _execute_tools(
     tool_calls: list[dict[str, Any]],
     telegram_user_id: int,
-) -> list[tuple[str, str]]:
-    """
-    Execute tool calls using real domain services (Phase 2).
-
-    Imports and calls the ToolExecutor from app.bot.tools.
-    Each tool is wired to backend services:
-      - Creator tracking → TrackedCreatorRepository
-      - Signals → SignalRepository + ScoringEngine
-      - Trading → TradeExecutionService + RiskManager
-      - Wallet linking → WalletLinkingService
-      - Preferences → UserPreferences repository
-
-    Args:
-        tool_calls: List of tool call objects from OpenAI
-        telegram_user_id: User ID for context
-
-    Returns:
-        List of (tool_call_id, result_json_str) tuples for submission back to OpenAI
-    """
+) -> list[dict[str, Any]]:
     from app.bot.tools import execute_tool
 
-    results = []
+    results: list[dict[str, Any]] = []
 
     for tool_call in tool_calls:
         tool_call_id = tool_call["id"]
@@ -239,30 +164,52 @@ async def _execute_tools(
             tool_args = json.loads(tool_args_str)
         except json.JSONDecodeError:
             result_obj = {"success": False, "error": "Invalid JSON in tool arguments"}
-            results.append((tool_call_id, json.dumps(result_obj)))
+            results.append(
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "result_str": json.dumps(result_obj),
+                    "result_obj": result_obj,
+                }
+            )
             continue
 
-        log.info(
-            "tool_call_received",
-            tool_name=tool_name,
-            tool_args=tool_args,
-            telegram_user_id=telegram_user_id,
-        )
-
-        # Execute the tool with real domain services
         result_obj = await execute_tool(
             telegram_user_id=telegram_user_id,
             tool_name=tool_name,
             tool_args=tool_args,
         )
-
-        log.info(
-            "tool_call_completed",
-            tool_name=tool_name,
-            success=result_obj.get("success", False),
-            telegram_user_id=telegram_user_id,
+        results.append(
+            {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "result_str": json.dumps(result_obj),
+                "result_obj": result_obj,
+            }
         )
 
-        results.append((tool_call_id, json.dumps(result_obj)))
-
     return results
+
+
+def _build_inline_buttons_data(tool_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    preview = tool_results.get("preview_trade") or tool_results.get("preview_trade_signal")
+    if preview and preview.get("success"):
+        data = preview.get("data", {})
+        return {
+            "type": "trade_preview",
+            "coin_symbol": data.get("coin"),
+            "action": data.get("action"),
+            "amount_usd": data.get("amount_usd"),
+        }
+
+    wallet = tool_results.get("start_wallet_link")
+    if wallet and wallet.get("success"):
+        data = wallet.get("data", {})
+        return {
+            "type": "wallet_link",
+            "url": data.get("link"),
+        }
+
+    return {}
+
+

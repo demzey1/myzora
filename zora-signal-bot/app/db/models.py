@@ -753,3 +753,65 @@ class ConversationSession(TimestampMixin, Base):
     )
     # Optionally store last N messages for context (JSON blob)
     recent_context_json: Mapped[str | None] = mapped_column(Text)
+
+
+class TradePreview(TimestampMixin, Base):
+    """Persisted preview of a user-requested trade before any execution."""
+    __tablename__ = "trade_previews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    coin_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    amount_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    price_usd: Mapped[float | None] = mapped_column(Float)
+    estimated_slippage_bps: Mapped[int | None] = mapped_column(Integer)
+    estimated_fees_usd: Mapped[float | None] = mapped_column(Float)
+    total_cost_usd: Mapped[float | None] = mapped_column(Float)
+    preview_json: Mapped[str | None] = mapped_column(Text)
+
+
+class LiveOrder(TimestampMixin, Base):
+    """Execution request lifecycle for live orders initiated through the bot."""
+    __tablename__ = "live_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    coin_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)
+    amount_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="previewed")
+    tx_hash: Mapped[str | None] = mapped_column(String(66))
+    preview_id: Mapped[int | None] = mapped_column(ForeignKey("trade_previews.id"), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class ExecutionAuditLog(Base):
+    """Immutable audit log for trade previews, confirmations, and execution outcomes."""
+    __tablename__ = "execution_audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    coin_symbol: Mapped[str | None] = mapped_column(String(32))
+    details_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ToolCallAuditLog(Base):
+    """Audit log for assistant-initiated tool calls and their outcomes."""
+    __tablename__ = "tool_call_audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    arguments_json: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    success: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

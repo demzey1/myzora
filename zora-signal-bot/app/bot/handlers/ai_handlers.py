@@ -1,13 +1,5 @@
 """
-app/bot/handlers/ai_handlers.py
-─────────────────────────────────────────────────────────────────────────────
-Handlers for:
-  - Free-text messages → Claude Haiku AI response
-  - /ai       — toggle AI on/off
-  - /premium  — show premium info
-  - /subscribe — start payment flow
-  - /mystatus — show subscription status
-  - /clearhistory — clear AI chat history
+Handlers for conversational AI chat and premium commands.
 """
 
 from __future__ import annotations
@@ -21,7 +13,6 @@ log = get_logger(__name__)
 
 
 async def _reply(update: Update, text: str, reply_markup=None, **kw) -> None:  # type: ignore[no-untyped-def]
-    """Reply with text, optionally with inline buttons."""
     await update.message.reply_text(
         text,
         parse_mode="HTML",
@@ -30,16 +21,8 @@ async def _reply(update: Update, text: str, reply_markup=None, **kw) -> None:  #
     )
 
 
-# ── Free-text message handler ─────────────────────────────────────────────────
-
 async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle any non-command message as a conversational AI input.
-    Routes to OpenAI Responses API for multi-turn chat with tool support.
-    
-    Accepts messages from any user (not admin-only).
-    Tool responses may include inline buttons for actions (Buy, Cancel, Close Position, etc).
-    """
+    """Handle plain chat messages as conversational assistant input."""
     if not update.message or not update.message.text:
         return
 
@@ -48,65 +31,48 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not text:
         return
 
-    # Check feature flag
     from app.config import settings
     from app.services.feature_flags import is_enabled
 
     if not settings.enable_conversational_mode or not is_enabled("ai"):
-        await _reply(update, "🤖 Conversational AI is currently disabled.")
+        await _reply(update, "Conversational AI is currently disabled.")
         return
 
-    # Show typing indicator
     await update.message.chat.send_action("typing")
 
-    # Send to assistant
     from app.bot.assistant import send_message_to_assistant
-    from app.bot.inline_buttons import (
-        make_trade_preview_buttons,
-        make_wallet_link_button,
-    )
+    from app.bot.inline_buttons import make_trade_preview_buttons, make_wallet_link_button
 
     try:
         response = await send_message_to_assistant(user_id, text)
-        
         if response.error:
-            await _reply(update, f"❌ {response.error}")
-        else:
-            # Add buttons if certain tools were executed
-            reply_markup = None
-            
-            if "preview_trade" in response.tools_executed:
-                # Try to extract trade parameters from response text
-                # This is a simple heuristic - a more robust approach would
-                # pass structured data through the response
-                if "buy" in response.text.lower() or "sell" in response.text.lower():
-                    action = "buy" if "buy" in response.text.lower() else "sell"
-                    # Attempt to extract coin symbol and amount (simplified)
-                    reply_markup = make_trade_preview_buttons("UNKNOWN", action, 0)
-            
-            elif "start_wallet_link" in response.tools_executed:
-                # Extract wallet link URL from response text
-                import re
-                url_match = re.search(r'(https?://\S+)', response.text)
-                if url_match:
-                    wallet_url = url_match.group(1)
-                    reply_markup = make_wallet_link_button(wallet_url)
-            
-            await _reply(update, response.text, reply_markup=reply_markup)
+            await _reply(update, f"Error: {response.error}")
+            return
 
-    except Exception as exc:
+        reply_markup = None
+        button_data = response.inline_buttons_data or {}
+        if button_data.get("type") == "trade_preview":
+            reply_markup = make_trade_preview_buttons(
+                button_data.get("coin_symbol", "UNKNOWN"),
+                button_data.get("action", "buy"),
+                float(button_data.get("amount_usd", 0) or 0),
+            )
+        elif button_data.get("type") == "wallet_link" and button_data.get("url"):
+            reply_markup = make_wallet_link_button(button_data["url"])
+
+        await _reply(update, response.text, reply_markup=reply_markup)
+
+    except Exception:
         log.exception("handle_free_text_error", exc_info=True)
         await _reply(update, "Sorry, I encountered an error. Please try again.")
 
 
-# ── /ai command ───────────────────────────────────────────────────────────────
-
 async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ai — toggle AI assistant on or off."""
+    """/ai - toggle AI assistant on or off."""
     from app.config import settings
     user_id = update.effective_user.id
     if not settings.is_admin(user_id):
-        await _reply(update, "⛔ Unauthorised.")
+        await _reply(update, "Unauthorized.")
         return
 
     from app.db.base import AsyncSessionLocal
@@ -122,28 +88,25 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if new_state:
         await _reply(
             update,
-            "🤖 <b>AI assistant is ON</b>\n\n"
+            "<b>AI assistant is ON</b>\n\n"
             "Just type any message and I'll respond.\n"
             "I can explain signals, discuss Zora coins, and remember your preferences.\n\n"
-            "Send /ai again to turn off."
+            "Send /ai again to turn off.",
         )
     else:
-        await _reply(update, "🤖 AI assistant is OFF. Send /ai to turn back on.")
+        await _reply(update, "AI assistant is OFF. Send /ai to turn back on.")
 
-
-# ── /premium command ──────────────────────────────────────────────────────────
 
 async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/premium — show what premium includes and how to subscribe."""
     from app.config import settings
     user_id = update.effective_user.id
     if not settings.is_admin(user_id):
-        await _reply(update, "⛔ Unauthorised.")
+        await _reply(update, "Unauthorized.")
         return
 
     from app.db.base import AsyncSessionLocal
     from app.db.repositories.ai import UserSubscriptionRepository
-    from app.services.premium import PREMIUM_PRICE_USD, SUBSCRIPTION_DAYS
+    from app.services.premium import PREMIUM_PRICE_USD
 
     async with AsyncSessionLocal() as session:
         repo = UserSubscriptionRepository(session)
@@ -151,182 +114,132 @@ async def cmd_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         sub = await repo.get_for_user(user_id)
 
     if is_premium and sub and sub.premium_expires_at:
-        from app.bot.handlers.commands import _age_label
         await _reply(
             update,
-            f"🌟 <b>You are Premium</b>\n\n"
-            f"Expires: {sub.premium_expires_at.strftime('%Y-%m-%d')}\n\n"
-            f"Use /subscribe to extend."
+            f"<b>You are Premium</b>\n\nExpires: {sub.premium_expires_at.strftime('%Y-%m-%d')}\n\nUse /subscribe to extend.",
         )
         return
 
     payment_configured = bool(settings.premium_payment_address)
-
     await _reply(
         update,
-        f"🌟 <b>Zora Signal Bot Premium</b>\n\n"
-        f"<b>Free tier (current):</b>\n"
-        f"✅ Creator tracking\n"
-        f"✅ Real-time signal alerts\n"
-        f"✅ Zora coin discovery\n"
-        f"✅ AI chat (20 messages/day)\n"
-        f"❌ Auto-trading\n"
-        f"❌ Extended AI context\n\n"
-        f"<b>Premium — ${PREMIUM_PRICE_USD:.2f}/month:</b>\n"
-        f"✅ Everything in Free\n"
-        f"⚡ Auto-trading (link wallet + it executes for you)\n"
-        f"🤖 AI chat (200 messages/day, deeper context)\n"
-        f"📊 Extended signal history\n"
-        f"🔔 Priority alerts\n\n"
-        + (f"Use /subscribe to pay ${PREMIUM_PRICE_USD:.2f} USDC or ETH on Base."
-           if payment_configured
-           else "⚠️ Payments not yet configured. Contact the operator.")
+        f"<b>Zora Signal Bot Premium</b>\n\n"
+        f"<b>Free tier:</b>\n"
+        f"AI chat, creator tracking, and signal discovery\n\n"
+        f"<b>Premium - ${PREMIUM_PRICE_USD:.2f}/month:</b>\n"
+        f"More AI usage, richer history, and priority features\n\n"
+        + (f"Use /subscribe to pay ${PREMIUM_PRICE_USD:.2f} on Base." if payment_configured else "Payments are not configured yet."),
     )
 
 
-# ── /subscribe command ────────────────────────────────────────────────────────
-
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/subscribe — initiate crypto payment for premium."""
     from app.config import settings
     user_id = update.effective_user.id
     if not settings.is_admin(user_id):
-        await _reply(update, "⛔ Unauthorised.")
+        await _reply(update, "Unauthorized.")
         return
 
     from app.services.feature_flags import is_enabled
     if not is_enabled("payments"):
-        await _reply(update, "💳 Premium subscriptions are not available right now.")
+        await _reply(update, "Premium subscriptions are not available right now.")
         return
 
     if not settings.premium_payment_address:
-        await _reply(
-            update,
-            "⚠️ Premium payments not configured yet.\n"
-            "The operator needs to set PREMIUM_PAYMENT_ADDRESS in .env."
-        )
+        await _reply(update, "Premium payments are not configured yet.")
         return
 
     from app.db.base import AsyncSessionLocal
     from app.db.repositories.ai import UserSubscriptionRepository
-    from app.services.premium import create_payment_request, PREMIUM_PRICE_USD
+    from app.services.premium import create_payment_request
 
     async with AsyncSessionLocal() as session:
         repo = UserSubscriptionRepository(session)
         if await repo.is_premium(user_id):
-            await _reply(update, "🌟 You're already Premium! Use /premium to see details.")
+            await _reply(update, "You're already Premium.")
             return
-
         result = await create_payment_request(session, user_id)
         await session.commit()
 
     if "error" in result:
-        await _reply(update, f"❌ {result['error']}")
+        await _reply(update, f"Error: {result['error']}")
         return
 
-    addr = result["payment_address"]
-    short_addr = f"{addr[:6]}...{addr[-4:]}"
     eth_line = (
-        f"OR <b>{result['eth_amount']} ETH</b> "
-        f"(≈ ${result['eth_price_usd']:.0f}/ETH)\n"
-        if result.get("eth_amount") else ""
+        f"OR <b>{result['eth_amount']} ETH</b> (approx. ${result['eth_price_usd']:.0f}/ETH)\n"
+        if result.get("eth_amount")
+        else ""
     )
-
     await _reply(
         update,
-        f"💳 <b>Premium Payment</b>\n\n"
-        f"Send exactly:\n"
-        f"<b>${result['usdc_amount']:.2f} USDC</b>\n"
-        f"{eth_line}\n"
-        f"To this address on <b>Base network</b>:\n"
-        f"<code>{addr}</code>\n\n"
-        f"USDC contract: <code>{result['usdc_contract']}</code>\n\n"
-        f"⏰ Payment window: 60 minutes\n"
-        f"✅ Bot confirms automatically after on-chain detection\n"
-        f"📅 Gets you {result['subscription_days']} days of Premium\n\n"
-        f"<b>⚠️ Send on Base (chain ID 8453) only. Other chains = lost funds.</b>"
+        f"<b>Premium Payment</b>\n\n"
+        f"Send exactly <b>${result['usdc_amount']:.2f} USDC</b>\n"
+        f"{eth_line}"
+        f"to <code>{result['payment_address']}</code> on <b>Base</b>.\n\n"
+        f"Window: 60 minutes\n"
+        f"Subscription: {result['subscription_days']} days\n\n"
+        f"<b>Send on Base only.</b>",
     )
 
 
-# ── /mystatus command ─────────────────────────────────────────────────────────
-
 async def cmd_mystatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/mystatus — show user's subscription and AI usage."""
     from app.config import settings
     user_id = update.effective_user.id
     if not settings.is_admin(user_id):
-        await _reply(update, "⛔ Unauthorised.")
+        await _reply(update, "Unauthorized.")
         return
 
     from app.db.base import AsyncSessionLocal
     from app.db.repositories.ai import (
-        UserSubscriptionRepository,
         ChatMessageRepository,
         UserPreferencesRepository,
+        UserSubscriptionRepository,
     )
     from app.services.ai_chat import FREE_DAILY_LIMIT, PREMIUM_DAILY_LIMIT
 
     async with AsyncSessionLocal() as session:
-        sub_repo  = UserSubscriptionRepository(session)
-        msg_repo  = ChatMessageRepository(session)
+        sub_repo = UserSubscriptionRepository(session)
+        msg_repo = ChatMessageRepository(session)
         pref_repo = UserPreferencesRepository(session)
 
-        sub        = await sub_repo.get_or_create(user_id)
+        sub = await sub_repo.get_or_create(user_id)
         is_premium = await sub_repo.is_premium(user_id)
         msgs_today = await msg_repo.count_today(user_id)
-        prefs      = await pref_repo.get_all(user_id)
+        prefs = await pref_repo.get_all(user_id)
 
-    tier_label  = "🌟 Premium" if is_premium else "🆓 Free"
-    limit       = PREMIUM_DAILY_LIMIT if is_premium else FREE_DAILY_LIMIT
-    ai_status   = "ON 🟢" if sub.ai_enabled else "OFF 🔴"
+    tier_label = "Premium" if is_premium else "Free"
+    limit = PREMIUM_DAILY_LIMIT if is_premium else FREE_DAILY_LIMIT
+    ai_status = "ON" if sub.ai_enabled else "OFF"
 
     lines = [
-        f"👤 <b>Your Status</b>\n",
-        f"Tier:         {tier_label}",
-    ]
-
-    if is_premium and sub.premium_expires_at:
-        lines.append(f"Expires:      {sub.premium_expires_at.strftime('%Y-%m-%d')}")
-
-    lines += [
-        f"AI chat:      {ai_status}",
-        f"AI today:     {msgs_today}/{limit} messages",
+        "<b>Your Status</b>",
+        f"Tier: {tier_label}",
+        f"AI chat: {ai_status}",
+        f"AI today: {msgs_today}/{limit}",
         "",
     ]
-
     if prefs:
         lines.append("<b>Remembered preferences:</b>")
-        for k, v in prefs.items():
-            lines.append(f"  • {k}: {v}")
+        for key, value in prefs.items():
+            lines.append(f"- {key}: {value}")
     else:
-        lines.append("<i>No preferences saved yet — just tell me your preferences in chat.</i>")
-
-    if not is_premium:
-        lines.append("\nUse /premium to see what Premium includes.")
+        lines.append("<i>No preferences saved yet.</i>")
 
     await _reply(update, "\n".join(lines))
 
 
-# ── /clearhistory command ─────────────────────────────────────────────────────
-
 async def cmd_clearhistory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/clearhistory — wipe AI chat history for a fresh start."""
     from app.config import settings
     user_id = update.effective_user.id
     if not settings.is_admin(user_id):
-        await _reply(update, "⛔ Unauthorised.")
+        await _reply(update, "Unauthorized.")
         return
 
     from app.db.base import AsyncSessionLocal
     from app.db.repositories.ai import ChatMessageRepository
 
     async with AsyncSessionLocal() as session:
-        repo  = ChatMessageRepository(session)
+        repo = ChatMessageRepository(session)
         count = await repo.clear_history(user_id)
         await session.commit()
 
-    await _reply(
-        update,
-        f"🗑️ Cleared {count} messages from AI chat history.\n"
-        "Starting fresh next time you chat."
-    )
+    await _reply(update, f"Cleared {count} messages from AI chat history.")

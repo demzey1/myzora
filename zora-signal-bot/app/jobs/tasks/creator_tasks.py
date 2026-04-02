@@ -325,7 +325,7 @@ async def _async_send_creator_alert(
     from app.config import settings
 
     sent = 0
-    for admin_id in settings.telegram_admin_user_ids:
+    for admin_id in settings.admin_user_ids:
         # Also notify the specific user who added this creator
         target_ids = {admin_id, creator.telegram_user_id}
         for tid in target_ids:
@@ -342,3 +342,4 @@ async def _async_send_creator_alert(
 
     log.info("creator_alert_sent", post_id=creator_post_id, sent_to=sent)
     return {"sent_to": sent}
+

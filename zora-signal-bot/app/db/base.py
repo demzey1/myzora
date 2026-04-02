@@ -1,10 +1,4 @@
-"""
-app/db/base.py
-─────────────────────────────────────────────────────────────────────────────
-Async SQLAlchemy engine + session factory.
-Import `AsyncSessionLocal` for use in repositories.
-Import `Base` in all model files so Alembic can detect them.
-"""
+"""Async SQLAlchemy engine + session factory."""
 
 from __future__ import annotations
 
@@ -16,17 +10,24 @@ from app.logging_config import get_logger
 
 log = get_logger(__name__)
 
-# ── Engine ────────────────────────────────────────────────────────────────────
-engine = create_async_engine(
-    settings.database_url.get_secret_value(),
-    pool_size=settings.db_pool_size,
-    max_overflow=settings.db_max_overflow,
-    pool_timeout=settings.db_pool_timeout,
-    pool_pre_ping=True,   # Detect stale connections
-    echo=settings.app_debug,
-)
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "echo": settings.app_debug,
+}
 
-# ── Session factory ───────────────────────────────────────────────────────────
+# SQLite test runs do not accept the Postgres pool sizing arguments.
+database_url = settings.database_url.get_secret_value()
+if not database_url.startswith("sqlite"):
+    engine_kwargs.update(
+        {
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_timeout": settings.db_pool_timeout,
+        }
+    )
+
+engine = create_async_engine(database_url, **engine_kwargs)
+
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -36,18 +37,11 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 )
 
 
-# ── Declarative base ──────────────────────────────────────────────────────────
 class Base(DeclarativeBase):
     """Common base class for all ORM models."""
-    pass
 
 
-# ── Dependency helper (FastAPI) ───────────────────────────────────────────────
 async def get_db() -> AsyncSession:  # type: ignore[return]
-    """
-    FastAPI dependency that yields an async DB session and
-    guarantees commit/rollback/close.
-    """
     async with AsyncSessionLocal() as session:
         try:
             yield session

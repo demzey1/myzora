@@ -1,18 +1,3 @@
-"""
-app/api/wallet_routes.py
-─────────────────────────────────────────────────────────────────────────────
-FastAPI routes for the wallet-linking web flow.
-
-These endpoints are called by the frontend (browser) after the user opens the
-wallet-link URL from Telegram. They are NOT called by the Telegram bot directly.
-
-Routes:
-  GET  /wallet/connect                  → serve the connect page (HTML)
-  POST /wallet/nonce  { address }       → return nonce to sign
-  POST /wallet/verify { address, sig }  → verify sig, finalise link
-  GET  /wallet/status                   → check if a session is still valid
-"""
-
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,6 +5,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.base import get_db
 from app.logging_config import get_logger
 from app.services.wallet_linking import (
@@ -31,8 +17,6 @@ from app.services.wallet_linking import (
 log = get_logger(__name__)
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
-
-# ── Request / response schemas ─────────────────────────────────────────────────
 
 class NonceRequest(BaseModel):
     address: str
@@ -56,25 +40,21 @@ class VerifyResponse(BaseModel):
     message: str
 
 
-# ── Connect page ───────────────────────────────────────────────────────────────
-
 @router.get("/connect", response_class=HTMLResponse)
 async def wallet_connect_page(
     session: str = Query(...),
     sig: str = Query(...),
 ) -> str:
-    """
-    Serve the wallet connect page.
-    Validates session token signature before rendering.
-    """
+    if not settings.enable_wallet_linking:
+        raise HTTPException(status_code=404, detail="Not found")
+
     if not verify_session_url_signature(session, sig):
         raise HTTPException(status_code=403, detail="Invalid session link")
 
-    # Minimal inline HTML — replace with a proper frontend in production
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-  <title>Zora Signal Bot — Link Wallet</title>
+  <title>Zora Signal Bot - Link Wallet</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     body {{ font-family: -apple-system, sans-serif; max-width: 480px; margin: 60px auto; padding: 20px; text-align: center; }}
@@ -88,10 +68,10 @@ async def wallet_connect_page(
   </style>
 </head>
 <body>
-  <h1>🔗 Link Your Wallet</h1>
+  <h1>Link Your Wallet</h1>
   <p>Connect your wallet to link it to your Telegram account on Zora Signal Bot.</p>
   <p style="font-size:0.8rem;color:#999">
-    You will be asked to sign a message — this does <strong>not</strong> cost gas
+    You will be asked to sign a message. This does <strong>not</strong> cost gas
     and does <strong>not</strong> grant trading permissions.
   </p>
 
@@ -150,18 +130,13 @@ async def wallet_connect_page(
     return html
 
 
-# ── Nonce endpoint ─────────────────────────────────────────────────────────────
-
 @router.post("/nonce", response_model=NonceResponse)
 async def get_nonce(
     req: NonceRequest,
     db: AsyncSession = Depends(get_db),
 ) -> NonceResponse:
-    """
-    Called by the frontend after wallet connects.
-    Sets the wallet address on the session and returns the nonce to sign.
-    """
-    from app.config import settings
+    if not settings.enable_wallet_linking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wallet linking is disabled")
 
     nonce = await set_nonce_address(db, req.session_token, req.address)
     if nonce is None:
@@ -177,33 +152,32 @@ async def get_nonce(
     )
 
 
-# ── Verify endpoint ────────────────────────────────────────────────────────────
-
 @router.post("/verify", response_model=VerifyResponse)
 async def verify_signature(
     req: VerifyRequest,
     db: AsyncSession = Depends(get_db),
 ) -> VerifyResponse:
-    """
-    Verify the EIP-191 signature and finalise the wallet link.
-    """
+    if not settings.enable_wallet_linking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wallet linking is disabled")
+
     ok, msg = await verify_and_finalize(db, req.session_token, req.address, req.signature)
     if ok:
         await db.commit()
-        # Notify the Telegram user asynchronously
         _notify_wallet_linked(req.address)
 
     return VerifyResponse(success=ok, message=msg)
 
-
-# ── Status endpoint ────────────────────────────────────────────────────────────
 
 @router.get("/status")
 async def session_status(
     session_token: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    if not settings.enable_wallet_linking:
+        return {"valid": False, "reason": "wallet_linking_disabled"}
+
     from app.db.repositories.wallet import WalletLinkNonceRepository
+
     repo = WalletLinkNonceRepository(db)
     nonce_row = await repo.get_valid_nonce(session_token)
     if nonce_row is None:
@@ -212,9 +186,9 @@ async def session_status(
 
 
 def _notify_wallet_linked(wallet_address: str) -> None:
-    """Fire-and-forget Celery task to send Telegram confirmation."""
     try:
         from app.jobs.tasks.wallet_tasks import notify_wallet_linked_telegram
+
         notify_wallet_linked_telegram.apply_async(
             kwargs={"wallet_address": wallet_address}, queue="alerts"
         )

@@ -134,10 +134,11 @@ async def _async_notify_closed(
     )
 
     tg_app = get_application()
-    for admin_id in settings.telegram_admin_user_ids:
+    for admin_id in settings.admin_user_ids:
         try:
             await tg_app.bot.send_message(
                 chat_id=admin_id, text=msg, parse_mode="HTML"
             )
         except Exception as exc:
             log.warning("close_notify_failed", admin_id=admin_id, error=str(exc))
+

@@ -1,25 +1,8 @@
-"""
-app/bot/tools.py
-─────────────────────────────────────────────────────────────────────────────
-Tool execution layer for assistant.
-
-Maps OpenAI tool calls to deterministic backend services:
-  - Creator tracking (add/list tracked creators)
-  - Signal queries (recent signals, explanations)
-  - Coin market data (live prices, liquidity)
-  - Trade management (preview, execute, position tracking)
-  - Wallet linking (secure flow initiation)
-  - User preferences (get/set)
-
-All tool execution is:
-  - Database-backed (persisted)
-  - Routed through domain services (not autonomous)
-  - Logged and auditable
-  - Gated by safety checks (risk controls, feature flags)
-"""
+"""Deterministic tool execution layer for the conversational assistant."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from datetime import datetime
@@ -31,85 +14,119 @@ from app.config import settings
 from app.db.base import AsyncSessionLocal
 from app.db.models import (
     CreatorWatchMode,
-    TrackedCreator,
-    UserPreferences,
+    ExecutionAuditLog,
+    LiveOrder,
     Recommendation,
+    ToolCallAuditLog,
+    TrackedCreator,
+    TradePreview,
+    UserPreferences,
 )
+from app.db.repositories.coins import CoinMarketSnapshotRepository, ZoraCoinRepository
 from app.db.repositories.creator_tracking import TrackedCreatorRepository
-from app.db.repositories.signals import SignalRepository
 from app.db.repositories.positions import PaperPositionRepository
-from app.db.repositories.coins import ZoraCoinRepository, CoinMarketSnapshotRepository
+from app.db.repositories.signals import SignalRepository
 from app.risk import check_trade_allowed
 from app.services.wallet_linking import create_link_session
+from app.trading.paper_engine import get_paper_engine
 
 log = logging.getLogger(__name__)
 
 
-# ── Tool execution router ──────────────────────────────────────────────────────
+async def _resolve(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
 
 class ToolExecutor:
-    """Execute tool calls from OpenAI assistant."""
+    """Execute assistant tool calls against deterministic backend services."""
 
     def __init__(self, telegram_user_id: int, session: AsyncSession):
         self.telegram_user_id = telegram_user_id
         self.session = session
 
-    async def execute(self, tool_name: str, tool_args: dict) -> dict:
-        """
-        Execute a tool and return result.
+    async def _session_add(self, obj) -> None:
+        result = self.session.add(obj)
+        if inspect.isawaitable(result):
+            await result
 
-        Returns:
-            {"success": bool, "data": Any} or {"success": False, "error": str}
-        """
+    async def execute(self, tool_name: str, tool_args: dict) -> dict:
+        tool_map = {
+            "track_creator": self.track_creator,
+            "list_tracked_creators": self.list_tracked_creators,
+            "classify_post_intent": self.classify_post_intent,
+            "find_zora_candidates": self.find_zora_candidates,
+            "get_zora_signals": self.get_zora_signals,
+            "explain_signal": self.explain_signal,
+            "get_coin_market_state": self.get_coin_market_state,
+            "preview_trade": self.preview_trade,
+            "preview_trade_signal": self.preview_trade,
+            "execute_trade": self.execute_trade,
+            "execute_trade_signal": self.execute_trade,
+            "start_wallet_link": self.start_wallet_link,
+            "check_wallet_link_status": self.check_wallet_link_status,
+            "get_position_status": self.get_position_status,
+            "close_position": self.close_position,
+            "get_user_preferences": self.get_user_preferences,
+            "update_user_preferences": self.update_user_preferences,
+        }
+        handler = tool_map.get(tool_name)
+        if handler is None:
+            result = {"success": False, "error": f"Unknown tool: {tool_name}"}
+            await self._log_tool_call(tool_name, tool_args, result)
+            return result
+
         try:
-            if tool_name == "track_creator":
-                return await self.track_creator(tool_args)
-            elif tool_name == "list_tracked_creators":
-                return await self.list_tracked_creators(tool_args)
-            elif tool_name == "get_zora_signals":
-                return await self.get_zora_signals(tool_args)
-            elif tool_name == "explain_signal":
-                return await self.explain_signal(tool_args)
-            elif tool_name == "get_coin_market_state":
-                return await self.get_coin_market_state(tool_args)
-            elif tool_name == "preview_trade":
-                return await self.preview_trade(tool_args)
-            elif tool_name == "execute_trade":
-                return await self.execute_trade(tool_args)
-            elif tool_name == "start_wallet_link":
-                return await self.start_wallet_link(tool_args)
-            elif tool_name == "check_wallet_link_status":
-                return await self.check_wallet_link_status(tool_args)
-            elif tool_name == "get_position_status":
-                return await self.get_position_status(tool_args)
-            elif tool_name == "get_user_preferences":
-                return await self.get_user_preferences(tool_args)
-            elif tool_name == "update_user_preferences":
-                return await self.update_user_preferences(tool_args)
-            else:
-                return {"success": False, "error": f"Unknown tool: {tool_name}"}
+            result = await handler(tool_args)
         except Exception as exc:
             log.exception("tool_execution_error", tool_name=tool_name, exc_info=True)
-            return {"success": False, "error": str(exc)}
+            result = {"success": False, "error": str(exc)}
 
-    # ── Creator Tracking ───────────────────────────────────────────────────────
+        await self._log_tool_call(tool_name, tool_args, result)
+        return result
+
+    async def _log_tool_call(self, tool_name: str, tool_args: dict, result: dict) -> None:
+        await self._session_add(
+            ToolCallAuditLog(
+                telegram_user_id=self.telegram_user_id,
+                tool_name=tool_name,
+                arguments_json=json.dumps(tool_args, default=str),
+                result_json=json.dumps(result, default=str),
+                success=bool(result.get("success")),
+            )
+        )
+        await self.session.flush()
+
+    async def _record_execution_audit(
+        self,
+        action: str,
+        status: str,
+        *,
+        coin_symbol: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        await self._session_add(
+            ExecutionAuditLog(
+                telegram_user_id=self.telegram_user_id,
+                action=action,
+                status=status,
+                coin_symbol=coin_symbol,
+                details_json=json.dumps(details or {}, default=str),
+            )
+        )
+        await self.session.flush()
 
     async def track_creator(self, args: dict) -> dict:
-        """Track a creator by X username."""
         x_username = args.get("x_username", "").strip()
         mode = args.get("mode", "hybrid")
-
         if not x_username:
             return {"success": False, "error": "x_username is required"}
-
-        # Validate mode
         valid_modes = {e.value for e in CreatorWatchMode}
         if mode not in valid_modes:
             return {"success": False, "error": f"Invalid mode: {mode}"}
 
         repo = TrackedCreatorRepository(self.session)
-
-        # Check if already tracking
         existing = await repo.get_by_user_and_handle(self.telegram_user_id, x_username)
         if existing:
             return {
@@ -120,31 +137,27 @@ class ToolExecutor:
                 },
             }
 
-        # Create new tracked creator (minimal for now — can enrich via SocialData later)
         tracked = TrackedCreator(
             telegram_user_id=self.telegram_user_id,
-            x_user_id=x_username,  # Placeholder; would resolve from SocialData in full impl
+            x_user_id=x_username,
             x_username=x_username,
             mode=CreatorWatchMode(mode),
             is_active=True,
         )
-        self.session.add(tracked)
+        await self._session_add(tracked)
         await self.session.commit()
-
         return {
             "success": True,
             "data": {
-                "message": f"✅ Now tracking @{x_username} in {mode} mode",
+                "message": f"Now tracking @{x_username} in {mode} mode",
                 "creator": x_username,
                 "mode": mode,
             },
         }
 
     async def list_tracked_creators(self, args: dict) -> dict:
-        """List all creators being tracked by this user."""
         repo = TrackedCreatorRepository(self.session)
         creators = await repo.get_active_for_user(self.telegram_user_id)
-
         return {
             "success": True,
             "data": {
@@ -160,20 +173,55 @@ class ToolExecutor:
             },
         }
 
-    # ── Signal Queries ────────────────────────────────────────────────────────
+    async def classify_post_intent(self, args: dict) -> dict:
+        text = (args.get("text") or args.get("post_text") or "").strip()
+        if not text:
+            return {"success": False, "error": "text is required"}
+        lowered = text.lower()
+        bullish_terms = ("buy", "ape", "bullish", "send it", "long")
+        bearish_terms = ("sell", "avoid", "rug", "bearish", "short")
+        if any(term in lowered for term in bullish_terms):
+            intent = "bullish"
+            confidence = 70
+        elif any(term in lowered for term in bearish_terms):
+            intent = "bearish"
+            confidence = 70
+        else:
+            intent = "neutral"
+            confidence = 45
+        return {
+            "success": True,
+            "data": {"intent": intent, "confidence": confidence, "used_llm": False},
+        }
+
+    async def find_zora_candidates(self, args: dict) -> dict:
+        query = (args.get("query") or args.get("creator") or args.get("text") or "").strip()
+        signals = await SignalRepository(self.session).get_recent(limit=5)
+        candidates = []
+        for signal in signals:
+            symbol = signal.coin.symbol if signal.coin else None
+            post_text = signal.post.text if signal.post and signal.post.text else ""
+            if not symbol:
+                continue
+            if query and query.lower() not in symbol.lower() and query.lower() not in post_text.lower():
+                continue
+            candidates.append(
+                {
+                    "coin_symbol": symbol,
+                    "signal_id": signal.id,
+                    "rank_score": signal.final_score,
+                    "reason": "Matched existing scored signal context",
+                }
+            )
+        return {
+            "success": True,
+            "data": {"query": query or None, "count": len(candidates), "candidates": candidates},
+        }
 
     async def get_zora_signals(self, args: dict) -> dict:
-        """Get recent Zora signals."""
-        hours = args.get("hours", 24)
         min_score = args.get("min_score", 50)
-        limit = 10
-
-        repo = SignalRepository(self.session)
-        signals = await repo.get_recent(limit=limit)
-
-        # Filter by score
+        signals = await SignalRepository(self.session).get_recent(limit=10)
         filtered = [s for s in signals if s.final_score >= min_score]
-
         return {
             "success": True,
             "data": {
@@ -181,7 +229,7 @@ class ToolExecutor:
                 "signals": [
                     {
                         "id": s.id,
-                        "coin_symbol": s.coin.symbol if s.coin else s.post.text[:20],
+                        "coin_symbol": s.coin.symbol if s.coin else (s.post.text[:20] if s.post and s.post.text else "Unknown"),
                         "score": s.final_score,
                         "recommendation": s.recommendation.value,
                         "created_at": s.created_at.isoformat(),
@@ -192,16 +240,12 @@ class ToolExecutor:
         }
 
     async def explain_signal(self, args: dict) -> dict:
-        """Explain why a signal was scored."""
         signal_id = args.get("signal_id")
         if not signal_id:
             return {"success": False, "error": "signal_id is required"}
-
-        repo = SignalRepository(self.session)
-        signal = await repo.get(signal_id)
+        signal = await SignalRepository(self.session).get(signal_id)
         if not signal:
             return {"success": False, "error": f"Signal {signal_id} not found"}
-
         return {
             "success": True,
             "data": {
@@ -218,43 +262,31 @@ class ToolExecutor:
 
     @staticmethod
     def _explain_score_breakdown(signal) -> str:
-        """Generate human-readable explanation of score."""
-        lines = []
-        lines.append(f"📊 Score Breakdown:")
-        lines.append(f"  Deterministic: {signal.deterministic_score:.0f}/100")
+        lines = [
+            "\U0001F4CA Score Breakdown:",
+            f"  Deterministic: {signal.deterministic_score:.0f}/100",
+        ]
         if signal.llm_score:
             lines.append(f"  LLM Assessment: {signal.llm_score:.0f}/100")
         lines.append(f"  Final: {signal.final_score:.0f}/100")
-
         if signal.recommendation == Recommendation.IGNORE:
-            lines.append("\n❌ IGNORE — Score below watch threshold")
+            lines.append("\nIGNORE - Score below watch threshold")
         elif signal.recommendation == Recommendation.WATCH:
-            lines.append("\n👀 WATCH — Worth monitoring")
+            lines.append("\nWATCH - Worth monitoring")
         elif signal.recommendation == Recommendation.ALERT:
-            lines.append("\n⚠️  ALERT — Strong signal, consider trading")
-        elif signal.recommendation in (
-            Recommendation.PAPER_TRADE,
-            Recommendation.LIVE_TRADE_READY,
-        ):
-            lines.append("\n🚀 TRADE READY — High confidence signal")
-
+            lines.append("\nALERT - Strong signal, consider trading")
+        else:
+            lines.append("\nTRADE READY - High confidence signal")
         return "\n".join(lines)
 
     async def get_coin_market_state(self, args: dict) -> dict:
-        """Get current market data for a coin."""
         coin_symbol = args.get("coin_symbol", "").strip()
         if not coin_symbol:
             return {"success": False, "error": "coin_symbol is required"}
-
-        coin_repo = ZoraCoinRepository(self.session)
-        coin = await coin_repo.get_by_symbol(coin_symbol)
+        coin = await ZoraCoinRepository(self.session).get_by_symbol(coin_symbol)
         if not coin:
             return {"success": False, "error": f"Coin {coin_symbol} not found"}
-
-        # Get latest market snapshot
-        snapshot_repo = CoinMarketSnapshotRepository(self.session)
-        latest_snapshot = await snapshot_repo.get_latest_for_coin(coin.id)
-
+        latest_snapshot = await CoinMarketSnapshotRepository(self.session).get_latest_for_coin(coin.id)
         return {
             "success": True,
             "data": {
@@ -264,123 +296,126 @@ class ToolExecutor:
                 "volume_5m": latest_snapshot.volume_5m_usd if latest_snapshot else None,
                 "market_cap_usd": latest_snapshot.market_cap_usd if latest_snapshot else None,
                 "holder_count": latest_snapshot.holder_count if latest_snapshot else None,
-                "snapshot_age_seconds": (
-                    int((datetime.utcnow() - latest_snapshot.captured_at).total_seconds())
-                    if latest_snapshot
-                    else None
-                ),
+                "snapshot_age_seconds": int((datetime.utcnow() - latest_snapshot.captured_at).total_seconds()) if latest_snapshot else None,
             },
         }
-
-    # ── Trade Management ───────────────────────────────────────────────────────
 
     async def preview_trade(self, args: dict) -> dict:
-        """Preview a trade without executing."""
         coin_symbol = args.get("coin_symbol", "").strip()
-        action = args.get("action", "buy")  # buy | sell
+        action = args.get("action", "buy")
         amount_usd = float(args.get("amount_usd", 0))
-
         if not coin_symbol or not action or amount_usd <= 0:
-            return {
-                "success": False,
-                "error": "coin_symbol, action, and amount_usd (>0) required",
-            }
-
+            return {"success": False, "error": "coin_symbol, action, and amount_usd (>0) required"}
         if action not in ("buy", "sell"):
             return {"success": False, "error": f"Invalid action: {action}"}
-
-        coin_repo = ZoraCoinRepository(self.session)
-        coin = await coin_repo.get_by_symbol(coin_symbol)
+        coin = await ZoraCoinRepository(self.session).get_by_symbol(coin_symbol)
         if not coin:
             return {"success": False, "error": f"Coin {coin_symbol} not found"}
-
-        # Get market data
-        snapshot_repo = CoinMarketSnapshotRepository(self.session)
-        latest_snapshot = await snapshot_repo.get_latest_for_coin(coin.id)
-
+        latest_snapshot = await CoinMarketSnapshotRepository(self.session).get_latest_for_coin(coin.id)
         price_usd = latest_snapshot.price_usd if latest_snapshot else 0
-        slippage_bps = 150  # Estimate 1.5%
-        fees_bps = 30  # Estimate 0.3% + base fee
-
-        return {
-            "success": True,
-            "data": {
-                "coin": coin_symbol,
-                "action": action,
-                "amount_usd": amount_usd,
-                "price_usd": price_usd,
-                "estimated_slippage_bps": slippage_bps,
-                "estimated_slippage_pct": slippage_bps / 100,
-                "estimated_fees_bps": fees_bps,
-                "estimated_fees_usd": (amount_usd * fees_bps) / 10000,
-                "total_cost_usd": amount_usd + (amount_usd * (slippage_bps + fees_bps)) / 10000,
-                "message": f"Preview: {action.upper()} {amount_usd:.2f} USD of {coin_symbol}\nEstimated total cost: ${amount_usd * (1 + (slippage_bps + fees_bps) / 10000):.2f}",
-            },
+        slippage_bps = 150
+        fees_bps = 30
+        total_cost_usd = amount_usd + (amount_usd * (slippage_bps + fees_bps)) / 10000
+        preview = {
+            "coin": coin_symbol,
+            "action": action,
+            "amount_usd": amount_usd,
+            "price_usd": price_usd,
+            "estimated_slippage_bps": slippage_bps,
+            "estimated_slippage_pct": slippage_bps / 100,
+            "estimated_fees_bps": fees_bps,
+            "estimated_fees_usd": (amount_usd * fees_bps) / 10000,
+            "total_cost_usd": total_cost_usd,
+            "message": f"Preview: {action.upper()} {amount_usd:.2f} USD of {coin_symbol}\nEstimated total cost: ${total_cost_usd:.2f}",
         }
+        await self._session_add(
+            TradePreview(
+                telegram_user_id=self.telegram_user_id,
+                coin_symbol=coin_symbol,
+                action=action,
+                amount_usd=amount_usd,
+                price_usd=price_usd,
+                estimated_slippage_bps=slippage_bps,
+                estimated_fees_usd=preview["estimated_fees_usd"],
+                total_cost_usd=total_cost_usd,
+                preview_json=json.dumps(preview, default=str),
+            )
+        )
+        await self._record_execution_audit("trade_preview", "previewed", coin_symbol=coin_symbol, details=preview)
+        await self.session.commit()
+        return {"success": True, "data": preview}
 
     async def execute_trade(self, args: dict) -> dict:
-        """Execute a real trade (gated by risk controls and wallet linking)."""
         coin_symbol = args.get("coin_symbol", "").strip()
         action = args.get("action", "buy").lower()
         amount_usd = float(args.get("amount_usd", 0))
-
         if not all([coin_symbol, action, amount_usd]):
             return {"success": False, "error": "coin_symbol, action, amount_usd required"}
-
         if action not in ("buy", "sell"):
             return {"success": False, "error": f"Invalid action: {action}"}
-
-        # Phase 3: Run comprehensive risk checks
         risk_check = await check_trade_allowed(
             session=self.session,
             telegram_user_id=self.telegram_user_id,
             coin_symbol=coin_symbol,
             action=action,
             amount_usd=amount_usd,
-            slippage_bps=150,  # Default estimate
+            slippage_bps=150,
         )
-
         if not risk_check.allowed:
-            return {
-                "success": False,
-                "error": risk_check.reason,
-                "blocked_reason": "risk_check_failed",
-            }
-
-        # TODO: Phase 3+ - Actually execute trade to smart contract
-        # For now, just indicate it would execute
+            await self._record_execution_audit(
+                "trade_execute",
+                "blocked",
+                coin_symbol=coin_symbol,
+                details={"reason": risk_check.reason, "action": action, "amount_usd": amount_usd},
+            )
+            await self.session.commit()
+            error_message = risk_check.reason
+            if "wallet not linked" in error_message.lower() and "wallet linking" not in error_message.lower():
+                error_message = f"Wallet linking required. {risk_check.reason}"
+            return {"success": False, "error": error_message, "blocked_reason": "risk_check_failed"}
+        live_order = LiveOrder(
+            telegram_user_id=self.telegram_user_id,
+            coin_symbol=coin_symbol,
+            action=action,
+            amount_usd=amount_usd,
+            status="pending_execution",
+        )
+        await self._session_add(live_order)
+        await self._record_execution_audit(
+            "trade_execute",
+            "pending_execution",
+            coin_symbol=coin_symbol,
+            details={"action": action, "amount_usd": amount_usd},
+        )
+        await self.session.commit()
         return {
             "success": True,
-            "message": f"✅ Trade would execute (Phase 3 implementation pending)\n"
-            f"Action: {action.upper()}\n"
-            f"Coin: {coin_symbol}\n"
-            f"Amount: ${amount_usd}",
-            "status": "pending_execution",
+            "data": {
+                "message": f"Trade queued for execution review: {action.upper()} ${amount_usd:.2f} of {coin_symbol}",
+                "status": "pending_execution",
+                "order_id": live_order.id,
+            },
         }
 
-    # ── Wallet Linking ────────────────────────────────────────────────────────
-
     async def start_wallet_link(self, args: dict) -> dict:
-        """Initiate wallet linking flow."""
-        # This will call the walletlinking service
+        if not settings.enable_wallet_linking:
+            return {"success": False, "error": "Wallet linking is disabled. Set ENABLE_WALLET_LINKING=true."}
         try:
-            session_token = await create_link_session(self.telegram_user_id)
-            link_url = f"{settings.wallet_link_base_url}/wallet-link/{session_token}"
-
+            link_url = await create_link_session(self.session, self.telegram_user_id)
+            await self._record_execution_audit("wallet_link_start", "created", details={"link_url": link_url})
+            await self.session.commit()
             return {
                 "success": True,
                 "data": {
                     "link": link_url,
                     "expires_seconds": settings.wallet_nonce_ttl_seconds,
-                    "message": f"🔗 Click to securely link your wallet:\n{link_url}",
+                    "message": f"Click to securely link your wallet:\n{link_url}",
                 },
             }
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
     async def check_wallet_link_status(self, args: dict) -> dict:
-        """Check if wallet is linked."""
-        # TODO: Implement in Phase 3 when wallet link verification is complete
         return {
             "success": True,
             "data": {
@@ -390,13 +425,8 @@ class ToolExecutor:
             },
         }
 
-    # ── Position Management ────────────────────────────────────────────────────
-
     async def get_position_status(self, args: dict) -> dict:
-        """Get current positions."""
-        repo = PaperPositionRepository(self.session)
-        positions = await repo.get_open()
-
+        positions = await PaperPositionRepository(self.session).get_open()
         return {
             "success": True,
             "data": {
@@ -414,72 +444,72 @@ class ToolExecutor:
             },
         }
 
-    # ── User Preferences ───────────────────────────────────────────────────────
-
-    async def get_user_preferences(self, args: dict) -> dict:
-        """Get user preferences."""
-        stmt = select(UserPreferences).where(
-            UserPreferences.telegram_user_id == self.telegram_user_id
+    async def close_position(self, args: dict) -> dict:
+        position_id = int(args.get("position_id", 0))
+        if position_id <= 0:
+            return {"success": False, "error": "position_id is required"}
+        repo = PaperPositionRepository(self.session)
+        position = await repo.get(position_id)
+        if position is None:
+            return {"success": False, "error": f"Position {position_id} not found"}
+        latest_snapshot = await CoinMarketSnapshotRepository(self.session).get_latest_for_coin(position.coin_id)
+        if latest_snapshot is None or latest_snapshot.price_usd is None:
+            return {"success": False, "error": "No price data available to close position"}
+        result = await get_paper_engine().close_position(self.session, position_id, latest_snapshot.price_usd, "MANUAL")
+        await self._record_execution_audit(
+            "close_position",
+            "closed" if result.success else "failed",
+            coin_symbol=position.coin.symbol if position.coin else None,
+            details={"position_id": position_id, "pnl_usd": result.pnl_usd, "pnl_pct": result.pnl_pct},
         )
-        result = await self.session.execute(stmt)
-        prefs_list = result.scalars().all()
-
+        await self.session.commit()
+        if not result.success:
+            return {"success": False, "error": result.message}
         return {
             "success": True,
             "data": {
-                "preferences": {p.preference_key: p.preference_value for p in prefs_list}
+                "position_id": position_id,
+                "pnl_usd": result.pnl_usd,
+                "pnl_pct": result.pnl_pct,
+                "exit_reason": result.exit_reason,
+                "message": f"Closed position #{position_id} at ${latest_snapshot.price_usd:.6f}",
             },
         }
 
-    async def update_user_preferences(self, args: dict) -> dict:
-        """Update user preferences."""
-        preferences = args.get("preferences", {})
+    async def get_user_preferences(self, args: dict) -> dict:
+        stmt = select(UserPreferences).where(UserPreferences.telegram_user_id == self.telegram_user_id)
+        result = await self.session.execute(stmt)
+        scalars = await _resolve(result.scalars())
+        prefs_list = await _resolve(scalars.all())
+        return {"success": True, "data": {"preferences": {p.preference_key: p.preference_value for p in prefs_list}}}
 
+    async def update_user_preferences(self, args: dict) -> dict:
+        preferences = args.get("preferences", {})
         for key, value in preferences.items():
-            # Upsert preference
             stmt = select(UserPreferences).where(
                 UserPreferences.telegram_user_id == self.telegram_user_id,
                 UserPreferences.preference_key == key,
             )
             result = await self.session.execute(stmt)
-            existing = result.scalar_one_or_none()
-
+            existing = await _resolve(result.scalar_one_or_none())
             if existing:
                 existing.preference_value = str(value)
             else:
-                pref = UserPreferences(
-                    telegram_user_id=self.telegram_user_id,
-                    preference_key=key,
-                    preference_value=str(value),
+                await self._session_add(
+                    UserPreferences(
+                        telegram_user_id=self.telegram_user_id,
+                        preference_key=key,
+                        preference_value=str(value),
+                    )
                 )
-                self.session.add(pref)
-
         await self.session.commit()
-
-        return {
-            "success": True,
-            "data": {"message": "Preferences updated", "count": len(preferences)},
-        }
+        return {"success": True, "data": {"message": "Preferences updated", "count": len(preferences)}}
 
 
-# ── Helper for using executor ──────────────────────────────────────────────────
-
-async def execute_tool(
-    telegram_user_id: int,
-    tool_name: str,
-    tool_args: dict,
-) -> dict:
-    """
-    Execute a tool call from OpenAI.
-
-    Args:
-        telegram_user_id: User ID
-        tool_name: Tool name from OpenAI
-        tool_args: Parsed arguments
-
-    Returns:
-        Result dict (always has 'success' bool)
-    """
+async def execute_tool(telegram_user_id: int, tool_name: str, tool_args: dict) -> dict:
     async with AsyncSessionLocal() as session:
         executor = ToolExecutor(telegram_user_id, session)
         return await executor.execute(tool_name, tool_args)
+
+
+
