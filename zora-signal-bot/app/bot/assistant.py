@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
+from app.config import settings
 from app.bot.conversation_store import (
     get_assistant_id,
     get_openai_client,
@@ -49,6 +51,10 @@ async def send_message_to_assistant(
 ) -> AssistantResponse:
     """Send a Telegram message into the assistant loop and return the final reply."""
     try:
+        local_response = await _handle_local_intent(telegram_user_id, user_message)
+        if local_response is not None:
+            return local_response
+
         client = await get_openai_client()
         assistant_id = await get_assistant_id()
         thread_id, _ = await get_or_create_conversation_session(telegram_user_id)
@@ -199,6 +205,222 @@ def _fallback_response(user_message: str) -> str:
         "coin lookups, trade previews, and secure wallet linking. Try: "
         "'track @creatorname' or 'show top signals'."
     )
+
+
+async def _handle_local_intent(
+    telegram_user_id: int,
+    user_message: str,
+) -> AssistantResponse | None:
+    from app.bot.tools import execute_tool
+
+    raw_text = user_message.strip()
+    lowered = raw_text.lower()
+
+    if lowered in {"hi", "hello", "hey", "yo", "gm", "sup"}:
+        return AssistantResponse(
+            text=(
+                "Hi. I’m your Zora signal assistant.\n\n"
+                "I can track creators, surface strong Zora signals, explain why a coin "
+                "was flagged, guide wallet linking, and preview trades with safety checks."
+            ),
+            inline_buttons_data={"type": "home_menu"},
+        )
+
+    if (
+        "what do you do" in lowered
+        or "who are you" in lowered
+        or lowered in {"help", "menu"}
+    ):
+        return AssistantResponse(
+            text=(
+                "I’m built for creator-driven Zora trading.\n\n"
+                "Use me to track creators, review live signals, explain signal scoring, "
+                "check coin market state, link your wallet, and preview trades before any "
+                "real action."
+            ),
+            inline_buttons_data={"type": "home_menu"},
+        )
+
+    track_match = re.match(
+        r"^(?:track|follow|watch)\s+@?([a-zA-Z0-9_]{1,32})$",
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+    if track_match:
+        x_username = track_match.group(1).lstrip("@")
+        result = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name="track_creator",
+            tool_args={
+                "x_username": x_username,
+                "mode": settings.default_creator_mode,
+            },
+        )
+        if result.get("success"):
+            return AssistantResponse(
+                text=(
+                    f"Now tracking <b>@{x_username}</b>.\n\n"
+                    f"Mode: <b>{settings.default_creator_mode.replace('_', ' ')}</b>\n"
+                    "I’ll prioritize creator-linked Zora opportunities and explain why "
+                    "they matter."
+                ),
+                inline_buttons_data={
+                    "type": "creator_tracked",
+                    "x_username": x_username,
+                },
+            )
+        return AssistantResponse(
+            text=(
+                f"I couldn’t start tracking <b>@{x_username}</b> right now.\n\n"
+                f"Reason: {result.get('error', 'Unknown error')}"
+            ),
+            error=result.get("error"),
+            inline_buttons_data={"type": "home_menu"},
+        )
+
+    if "top signals" in lowered or "show signals" in lowered or "bullish zora signals" in lowered:
+        result = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name="get_zora_signals",
+            tool_args={"min_score": 60},
+        )
+        if result.get("success"):
+            return AssistantResponse(
+                text=_format_top_signals_text(result),
+                inline_buttons_data={
+                    "type": "signals_overview",
+                    "top_signal": _get_top_signal(result),
+                },
+            )
+        return AssistantResponse(
+            text="I couldn’t load signals right now. Try again in a moment.",
+            error=result.get("error"),
+            inline_buttons_data={"type": "home_menu"},
+        )
+
+    if "link my wallet" in lowered:
+        result = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name="start_wallet_link",
+            tool_args={},
+        )
+        if result.get("success"):
+            wallet_data = result.get("data", {})
+            return AssistantResponse(
+                text=(
+                    "Secure wallet link ready.\n\n"
+                    "Open the link below, connect your wallet, and sign the nonce. "
+                    "No private keys are ever sent through Telegram."
+                ),
+                inline_buttons_data={
+                    "type": "wallet_link",
+                    "url": wallet_data.get("link"),
+                },
+            )
+        return AssistantResponse(
+            text=(
+                "Wallet linking isn’t available right now.\n\n"
+                f"Reason: {result.get('error', 'Unknown error')}"
+            ),
+            error=result.get("error"),
+            inline_buttons_data={"type": "home_menu"},
+        )
+
+    if "wallet status" in lowered or "wallet link status" in lowered:
+        result = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name="check_wallet_link_status",
+            tool_args={},
+        )
+        return AssistantResponse(
+            text=_format_wallet_status_text(result),
+            error=None if result.get("success") else result.get("error"),
+            inline_buttons_data={"type": "wallet_status"},
+        )
+
+    if "positions" in lowered:
+        result = await execute_tool(
+            telegram_user_id=telegram_user_id,
+            tool_name="get_position_status",
+            tool_args={},
+        )
+        return AssistantResponse(
+            text=_format_positions_text(result),
+            error=None if result.get("success") else result.get("error"),
+            inline_buttons_data={"type": "positions"},
+        )
+
+    return None
+
+
+def _get_top_signal(result: dict[str, Any]) -> dict[str, Any] | None:
+    signals = result.get("data", {}).get("signals", [])
+    if not signals:
+        return None
+    return signals[0]
+
+
+def _format_top_signals_text(result: dict[str, Any]) -> str:
+    signals = result.get("data", {}).get("signals", [])
+    if not signals:
+        return (
+            "No strong Zora signals are live right now.\n\n"
+            "Try again later, or track a creator so I can watch for fresh setups."
+        )
+
+    lines = ["<b>Top Zora Signals</b>\n"]
+    for signal in signals[:3]:
+        lines.append(
+            f"• <code>#{signal['id']}</code> <b>{signal['coin_symbol']}</b>  "
+            f"score <b>{signal['score']}</b>  {signal['recommendation'].replace('_', ' ')}"
+        )
+
+    lines.append("\nTap below to explain the top setup, preview a buy, or refresh.")
+    return "\n".join(lines)
+
+
+def _format_wallet_status_text(result: dict[str, Any]) -> str:
+    if not result.get("success"):
+        return "I couldn’t load your wallet status right now."
+
+    data = result.get("data", {})
+    wallet_linked = data.get("wallet_linked", False)
+    trading_enabled = data.get("trading_enabled", False)
+    if wallet_linked:
+        trading_text = "enabled" if trading_enabled else "disabled"
+        return (
+            "<b>Wallet Status</b>\n\n"
+            f"Linked: <b>Yes</b>\nTrading: <b>{trading_text}</b>\n\n"
+            "You can ask for trade previews or review positions next."
+        )
+
+    return (
+        "<b>Wallet Status</b>\n\n"
+        "No wallet is linked yet.\n\n"
+        "Use the button below to start the secure wallet-link flow."
+    )
+
+
+def _format_positions_text(result: dict[str, Any]) -> str:
+    if not result.get("success"):
+        return "I couldn’t load positions right now."
+
+    data = result.get("data", {})
+    positions = data.get("positions", [])
+    if not positions:
+        return (
+            "<b>Positions</b>\n\n"
+            "No open positions right now.\n\n"
+            "Ask for top signals or preview a trade to get started."
+        )
+
+    lines = ["<b>Open Positions</b>\n"]
+    for position in positions[:3]:
+        lines.append(
+            f"• <code>#{position['id']}</code> <b>{position['coin']}</b>  "
+            f"${position['size_usd']:.0f} @ ${position['entry_price']:.6f}"
+        )
+    return "\n".join(lines)
 
 
 async def _execute_tools(

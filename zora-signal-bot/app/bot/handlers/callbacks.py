@@ -24,8 +24,6 @@ log = get_logger(__name__)
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-
     data = query.data or ""
     
     # Route to different handlers based on callback data prefix
@@ -36,9 +34,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if "|" in data:
         # AI trading/wallet button
         from app.bot.inline_buttons import generic_callback_handler as ai_callback_handler
-        # Re-answer since we already answered above
         await ai_callback_handler(update, context)
         return
+
+    await query.answer()
     
     # Legacy admin callbacks (approval, ignore, refresh)
     if ":" not in data:
@@ -69,6 +68,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     elif action == "approve_live":
         await _handle_approve_live(query, context, signal_id, user_id)
+
+    elif action == "explain":
+        await _handle_explain(query, signal_id, user_id)
 
     elif action == "ignore":
         await _handle_ignore(query, signal_id, user_id)
@@ -108,11 +110,34 @@ async def _handle_approve_paper(query, context, signal_id: int, user_id: int) ->
         log.info("inline_paper_approved", signal_id=signal_id, position_id=result.position_id)
         new_text = (
             (query.message.text or "")
-            + f"\n\n✅ <b>Paper trade opened</b> — Position <code>#{result.position_id}</code>"
+            + f"\n\n✅ <b>Simulation opened</b> — Position <code>#{result.position_id}</code>"
         )
         await query.edit_message_text(new_text, parse_mode="HTML")
     else:
         await query.answer(f"Blocked: {result.message}", show_alert=True)
+
+
+async def _handle_explain(query, signal_id: int, user_id: int) -> None:
+    from app.bot.tools import execute_tool
+
+    result = await execute_tool(
+        telegram_user_id=user_id,
+        tool_name="explain_signal",
+        tool_args={"signal_id": signal_id},
+    )
+    if not result.get("success"):
+        await query.answer(result.get("error", "Explanation unavailable"), show_alert=True)
+        return
+
+    data = result.get("data", {})
+    await query.edit_message_text(
+        (
+            f"<b>Why {data.get('coin', 'this coin')} was flagged</b>\n\n"
+            f"{data.get('explanation', 'No explanation available.')}\n\n"
+            f"Recommendation: <b>{str(data.get('recommendation', '')).replace('_', ' ')}</b>"
+        ),
+        parse_mode="HTML",
+    )
 
 
 async def _handle_ignore(query, signal_id: int, user_id: int) -> None:

@@ -1,5 +1,5 @@
-version: "3.9"
-
+# Run Docker Compose from this repository root:
+#   c:\Users\User\Downloads\zora-signal-bot-final\zora-signal-bot
 # ONE-COMMAND: docker compose up --build
 
 x-app-env: &app-env

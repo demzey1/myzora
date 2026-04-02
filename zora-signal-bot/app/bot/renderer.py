@@ -105,18 +105,14 @@ def format_signal_alert(
 
 def signal_inline_keyboard(signal_id: int, include_live: bool = False) -> InlineKeyboardMarkup:
     """Build the inline action buttons shown beneath a signal alert."""
-    row1 = [
-        InlineKeyboardButton("✅ Paper trade", callback_data=f"approve_paper:{signal_id}"),
-        InlineKeyboardButton("🙈 Ignore", callback_data=f"ignore:{signal_id}"),
-    ]
-    row2 = [
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"refresh:{signal_id}"),
-    ]
+    row1 = [InlineKeyboardButton("Explain", callback_data=f"explain:{signal_id}")]
+    row2 = [InlineKeyboardButton("Ignore", callback_data=f"ignore:{signal_id}")]
+    row3 = [InlineKeyboardButton("Refresh", callback_data=f"refresh:{signal_id}")]
     if include_live:
-        row2.append(
-            InlineKeyboardButton("⚡ Approve LIVE", callback_data=f"approve_live:{signal_id}")
+        row1.append(
+            InlineKeyboardButton("Review Live", callback_data=f"approve_live:{signal_id}")
         )
-    return InlineKeyboardMarkup([row1, row2])
+    return InlineKeyboardMarkup([row1, row2, row3])
 
 
 def format_status(
@@ -128,52 +124,44 @@ def format_status(
     total_signals_today: int,
     kill_switch_active: bool,
 ) -> str:
-    paper_icon = "🟢" if paper_trading else "🔴"
     live_icon = "🟢" if live_trading else "🔴"
     kill_icon = "🛑" if kill_switch_active else "✅"
+    sim_text = "available" if paper_trading else "off"
 
     return (
-        "📡 <b>Zora Signal Bot — Status</b>\n\n"
-        f"{kill_icon} Kill switch: {'ACTIVE' if kill_switch_active else 'inactive'}\n"
-        f"{paper_icon} Paper trading: {'ON' if paper_trading else 'OFF'}\n"
-        f"{live_icon} Live trading:  {'ON' if live_trading else 'OFF'}\n\n"
-        f"Open paper positions: <b>{open_paper_positions}</b>\n"
-        f"Open live positions:  <b>{open_live_positions}</b>\n"
-        f"Signals today:        <b>{total_signals_today}</b>"
+        "<b>Zora Signal Bot</b>\n"
+        "<i>Premium creator-led signal and trading assistant</i>\n\n"
+        f"{kill_icon} Safety state: <b>{'Locked' if kill_switch_active else 'Ready'}</b>\n"
+        f"{live_icon} Live execution: <b>{'Enabled' if live_trading else 'Guarded'}</b>\n"
+        f"Simulation mode: <b>{sim_text}</b>\n\n"
+        "<b>Today</b>\n"
+        f"Signals detected: <b>{total_signals_today}</b>\n"
+        f"Open live positions: <b>{open_live_positions}</b>\n"
+        f"Open simulation positions: <b>{open_paper_positions}</b>\n\n"
+        "Use the buttons below to move into signals, wallet, positions, or settings."
     )
 
 
 def format_help() -> str:
     return (
-        "🤖 <b>Zora Signal Bot — Commands</b>\n\n"
-        "<b>Info</b>\n"
-        "/status  — system status\n"
-        "/health  — service health check\n"
-        "/signals — recent signals\n"
-        "/recent  — recent posts ingested\n"
-        "/positions — open positions\n"
-        "/pnl     — paper trading P&amp;L summary\n\n"
-        "<b>Watchlist</b>\n"
-        "/watchlist              — list monitored accounts\n"
-        "/addaccount @handle     — add X account\n"
-        "/removeaccount @handle  — remove X account\n\n"
-        "<b>Scoring</b>\n"
-        "/score &lt;url_or_id&gt;  — score a specific post\n\n"
-        "<b>Trading</b>\n"
-        "/paper_on   — enable paper trading\n"
-        "/paper_off  — disable paper trading\n"
-        "/live_on    — enable live trading (⚠️ admin)\n"
-        "/live_off   — disable live trading\n\n"
-        "<b>Approval</b>\n"
-        "/approve &lt;signal_id&gt; — approve a signal\n"
-        "/reject  &lt;signal_id&gt; — reject a signal\n\n"
-        "<b>Admin</b>\n"
-        "/config    — show current configuration\n"
-        "/kill      — 🛑 emergency kill switch\n\n"
-        "<b>Creator Overrides</b>\n"
-        "/blacklist @handle  — blacklist account or coin\n"
-        "/whitelist @handle  — whitelist with score boost\n"
-        "/overrides          — list all active overrides\n"
+        "<b>Zora Signal Bot</b>\n"
+        "<i>Chat-first creator tracking, signal review, and trading guidance</i>\n\n"
+        "<b>What I can do</b>\n"
+        "• Track creators and watch for Zora-linked setups\n"
+        "• Show top signals and explain exactly why they were flagged\n"
+        "• Check coin market state and guide secure wallet linking\n"
+        "• Preview trades with safety gates before any real action\n\n"
+        "<b>Best way to use me</b>\n"
+        "Just chat naturally. You do not need commands for normal use.\n\n"
+        "Examples:\n"
+        "• <code>track @creatorname</code>\n"
+        "• <code>show top signals</code>\n"
+        "• <code>why was this flagged?</code>\n"
+        "• <code>link my wallet</code>\n\n"
+        "<b>Advanced commands</b>\n"
+        "<i>Secondary admin and fallback controls</i>\n"
+        "<code>/signals</code>  <code>/positions</code>  <code>/config</code>  "
+        "<code>/features</code>  <code>/health</code>"
     )
 
 

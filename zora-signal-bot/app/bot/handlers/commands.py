@@ -14,6 +14,12 @@ from __future__ import annotations
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.bot.inline_buttons import (
+    make_help_buttons,
+    make_home_buttons,
+    make_signals_overview_buttons,
+    make_status_buttons,
+)
 from app.bot.middleware import check_admin
 from app.bot.renderer import format_help, format_status, signal_inline_keyboard
 from app.config import settings
@@ -42,15 +48,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await _reply(
         update,
-        f"👋 Welcome, {user.first_name}!\n\n"
-        "I monitor X/Twitter accounts for Zora coin opportunities.\n"
-        "Use /help to see available commands.",
+        f"<b>Welcome, {user.first_name}</b>\n"
+        "<i>Zora Signal Bot</i>\n\n"
+        "A premium Telegram assistant for creator-led Zora signals and safety-gated trading.\n\n"
+        "Track creators, review high-conviction setups, understand why a signal was flagged, "
+        "and move into wallet or trade flows without leaving chat.\n\n"
+        "You can just type naturally or start with one of the guided actions below.",
+        reply_markup=make_home_buttons(),
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from app.bot.renderer import format_help
-    await _reply(update, format_help())
+    await _reply(update, format_help(), reply_markup=make_help_buttons())
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -124,7 +133,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         total_signals_today=sig_today,
         kill_switch_active=context.bot_data["kill_switch"],
     )
-    await _reply(update, msg)
+    await _reply(update, msg, reply_markup=make_status_buttons())
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -304,9 +313,13 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     async with AsyncSessionLocal() as session:
         signals = await SignalRepository(session).get_recent(limit=10)
     if not signals:
-        await _reply(update, "🎯 No signals yet.")
+        await _reply(
+            update,
+            "<b>Top Signals</b>\n\nNo signals are live right now.\n\nTry again soon or track a creator first.",
+            reply_markup=make_home_buttons(),
+        )
         return
-    lines = ["🎯 <b>Recent Signals</b>\n"]
+    lines = ["<b>Top Signals</b>\n"]
     for sig in signals:
         rec_icon = {"IGNORE": "🔇","WATCH": "👀","ALERT": "🚨",
                     "PAPER_TRADE": "📝","LIVE_TRADE_READY": "⚡"}.get(sig.recommendation.value, "ℹ️")
@@ -314,7 +327,16 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"{rec_icon} <code>#{sig.id}</code>  "
             f"score=<b>{sig.final_score:.0f}</b>  {sig.recommendation.value}"
         )
-    await _reply(update, "\n".join(lines))
+    lines.append("\nUse the buttons below to explain or review the top setup.")
+    top_signal = {
+        "id": signals[0].id,
+        "coin_symbol": signals[0].coin.symbol if getattr(signals[0], "coin", None) else "UNKNOWN",
+    }
+    await _reply(
+        update,
+        "\n".join(lines),
+        reply_markup=make_signals_overview_buttons(top_signal),
+    )
 
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -332,9 +354,9 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             sym = coin.symbol if coin else "???"
             rows.append((p, sym))
     if not rows:
-        await _reply(update, "📊 No open paper positions.")
+        await _reply(update, "📊 No open simulation positions.")
         return
-    lines = ["📊 <b>Open Paper Positions</b>\n"]
+    lines = ["📊 <b>Open Positions</b>\n", "<i>Simulation positions are shown here when live positions are not open.</i>\n"]
     for p, sym in rows:
         age = _age_label(p.opened_at)
         lines.append(
@@ -353,12 +375,12 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with AsyncSessionLocal() as session:
         s = await PaperPositionRepository(session).get_pnl_summary()
     if s["total_trades"] == 0:
-        await _reply(update, "💰 No closed paper positions yet.")
+        await _reply(update, "💰 No closed simulation positions yet.")
         return
     pnl_color = "🟢" if s["total_pnl_usd"] >= 0 else "🔴"
     sign = "+" if s["total_pnl_usd"] >= 0 else ""
     msg = (
-        "💰 <b>Paper Trading P&amp;L</b>\n\n"
+        "💰 <b>Simulation P&amp;L</b>\n\n"
         f"Total trades:  <b>{s['total_trades']}</b>\n"
         f"Win / Loss:    <b>{s['winning_trades']} / {s['losing_trades']}</b>\n"
         f"Win rate:      <b>{s['win_rate_pct']:.1f}%</b>\n"

@@ -41,13 +41,21 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.chat.send_action("typing")
 
     from app.bot.assistant import send_message_to_assistant
-    from app.bot.inline_buttons import make_trade_preview_buttons, make_wallet_link_button
+    from app.bot.inline_buttons import (
+        make_creator_tracked_buttons,
+        make_help_buttons,
+        make_home_buttons,
+        make_positions_buttons,
+        make_settings_buttons,
+        make_signals_overview_buttons,
+        make_status_buttons,
+        make_trade_preview_buttons,
+        make_wallet_link_button,
+        make_wallet_status_buttons,
+    )
 
     try:
         response = await send_message_to_assistant(user_id, text)
-        if response.error:
-            await _reply(update, f"Error: {response.error}")
-            return
 
         reply_markup = None
         button_data = response.inline_buttons_data or {}
@@ -59,17 +67,51 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         elif button_data.get("type") == "wallet_link" and button_data.get("url"):
             reply_markup = make_wallet_link_button(button_data["url"])
+        elif button_data.get("type") == "home_menu":
+            reply_markup = make_home_buttons()
+        elif button_data.get("type") == "signals_overview":
+            reply_markup = make_signals_overview_buttons(button_data.get("top_signal"))
+        elif button_data.get("type") == "creator_tracked":
+            reply_markup = make_creator_tracked_buttons(button_data.get("x_username", "creator"))
+        elif button_data.get("type") == "wallet_status":
+            reply_markup = make_wallet_status_buttons()
+        elif button_data.get("type") == "positions":
+            reply_markup = make_positions_buttons()
+        elif button_data.get("type") == "settings":
+            reply_markup = make_settings_buttons()
+        elif button_data.get("type") == "help":
+            reply_markup = make_help_buttons()
+        elif button_data.get("type") == "status":
+            reply_markup = make_status_buttons()
 
-        await _reply(update, response.text, reply_markup=reply_markup)
+        if response.error:
+            log.warning(
+                "assistant_response_error_fallback",
+                error=response.error,
+                user_id=user_id,
+                message_text=text,
+            )
+
+        await _reply(
+            update,
+            response.text or "I hit a temporary issue. Try one of the actions below.",
+            reply_markup=reply_markup,
+        )
 
     except Exception as exc:
+        from app.bot.inline_buttons import make_home_buttons
+
         log.exception(
             "handle_free_text_error",
             error=str(exc),
             user_id=user_id,
             message_text=text,
         )
-        await _reply(update, "Sorry, I encountered an error. Please try again.")
+        await _reply(
+            update,
+            "I hit a temporary issue, but I’m still here.\n\nTry one of the guided actions below.",
+            reply_markup=make_home_buttons(),
+        )
 
 
 async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

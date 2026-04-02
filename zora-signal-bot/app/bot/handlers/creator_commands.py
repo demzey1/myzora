@@ -11,6 +11,12 @@ from __future__ import annotations
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.bot.inline_buttons import (
+    make_creator_tracked_buttons,
+    make_home_buttons,
+    make_wallet_link_button,
+    make_wallet_status_buttons,
+)
 from app.bot.middleware import check_admin
 from app.logging_config import get_logger
 
@@ -89,9 +95,10 @@ async def cmd_addcreator(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     log.info("creator_added", username=x_user.username, telegram_user_id=user_id)
     await _reply(
         update,
-        f"✅ Added <b>@{x_user.username}</b> to your creator watchlist.\n"
+        f"Now tracking <b>@{x_user.username}</b>.\n"
         f"Followers: {x_user.public_metrics.followers_count:,}\n\n"
-        f"I'll alert you when they post bullish signals linked to Zora coins.",
+        "I’ll prioritize creator-linked Zora setups and explain why they matter.",
+        reply_markup=make_creator_tracked_buttons(x_user.username),
     )
 
 
@@ -142,7 +149,8 @@ async def cmd_creators(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not creators:
         await _reply(
             update,
-            "📋 Your creator watchlist is empty.\n\nUse /addcreator @handle to start tracking."
+            "📋 Your creator watchlist is empty.\n\nSend <code>track @creatorname</code> to start.",
+            reply_markup=make_home_buttons(),
         )
         return
 
@@ -152,8 +160,8 @@ async def cmd_creators(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         mode_label = c.mode.value.replace("_", " ")
         lines.append(f"• @{c.x_username}  <i>{fol} followers</i>  [{mode_label}]")
 
-    lines.append("\nUse /mode <creator_only|keyword_only|hybrid> to change strategy.")
-    await _reply(update, "\n".join(lines))
+    lines.append("\nUse chat or /mode if you want to change tracking strategy.")
+    await _reply(update, "\n".join(lines), reply_markup=make_home_buttons())
 
 
 async def cmd_creatorstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -206,7 +214,7 @@ async def cmd_creatorstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         snippet = (p.text or "")[:60].replace("<", "&lt;").replace(">", "&gt;")
         lines.append(f"• [{age}]{sentiment} {snippet}…")
 
-    await _reply(update, "\n".join(lines))
+    await _reply(update, "\n".join(lines), reply_markup=make_creator_tracked_buttons(handle))
 
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -250,6 +258,7 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(
         update,
         f"✅ Strategy mode set to <b>{mode}</b>\n<i>{mode_descriptions[mode]}</i>",
+        reply_markup=make_home_buttons(),
     )
 
 
@@ -279,12 +288,10 @@ async def cmd_linkwallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _reply(
         update,
         "🔗 <b>Link Your Wallet</b>\n\n"
-        "Click the link below to connect your wallet securely.\n"
-        "You'll be asked to <b>sign a message</b> — this is free and does not "
-        "grant any trading permissions.\n\n"
-        f"<a href='{link_url}'>🌐 Open Wallet Connect Page</a>\n\n"
-        f"⏰ This link expires in {settings.wallet_nonce_ttl_seconds // 60} minutes.\n\n"
-        "<i>Never share your private key or seed phrase with anyone.</i>",
+        "Open the secure link below, connect your wallet, and sign the verification nonce.\n\n"
+        "No private keys ever enter Telegram, and live actions stay safety-gated.\n\n"
+        f"⏰ This link expires in {settings.wallet_nonce_ttl_seconds // 60} minutes.",
+        reply_markup=make_wallet_link_button(link_url),
     )
 
 
@@ -305,7 +312,8 @@ async def cmd_walletstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if link is None:
             await _reply(
                 update,
-                "❌ No wallet linked.\n\nUse /linkwallet to connect your wallet."
+                "❌ No wallet linked.\n\nUse the button below to start the secure wallet-link flow.",
+                reply_markup=make_wallet_status_buttons(),
             )
             return
 
@@ -338,7 +346,7 @@ async def cmd_walletstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         lines.append("\n<i>No Zora profile found for this wallet.</i>")
 
     lines.append("\nUse /unlinkwallet to remove.")
-    await _reply(update, "\n".join(lines))
+    await _reply(update, "\n".join(lines), reply_markup=make_wallet_status_buttons())
 
 
 async def cmd_unlinkwallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,4 +364,4 @@ async def cmd_unlinkwallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await session.commit()
 
     icon = "✅" if ok else "❌"
-    await _reply(update, f"{icon} {msg}")
+    await _reply(update, f"{icon} {msg}", reply_markup=make_home_buttons())
