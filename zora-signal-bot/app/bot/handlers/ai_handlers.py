@@ -62,8 +62,13 @@ async def handle_free_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await _reply(update, response.text, reply_markup=reply_markup)
 
-    except Exception:
-        log.exception("handle_free_text_error", exc_info=True)
+    except Exception as exc:
+        log.exception(
+            "handle_free_text_error",
+            error=str(exc),
+            user_id=user_id,
+            message_text=text,
+        )
         await _reply(update, "Sorry, I encountered an error. Please try again.")
 
 

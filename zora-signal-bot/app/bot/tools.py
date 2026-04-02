@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import logging
 from datetime import datetime
 
 from sqlalchemy import select
@@ -26,11 +25,12 @@ from app.db.repositories.coins import CoinMarketSnapshotRepository, ZoraCoinRepo
 from app.db.repositories.creator_tracking import TrackedCreatorRepository
 from app.db.repositories.positions import PaperPositionRepository
 from app.db.repositories.signals import SignalRepository
+from app.logging_config import get_logger
 from app.risk import check_trade_allowed
 from app.services.wallet_linking import create_link_session
 from app.trading.paper_engine import get_paper_engine
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 async def _resolve(value):
@@ -80,7 +80,12 @@ class ToolExecutor:
         try:
             result = await handler(tool_args)
         except Exception as exc:
-            log.exception("tool_execution_error", tool_name=tool_name, exc_info=True)
+            log.exception(
+                "tool_execution_error",
+                tool_name=tool_name,
+                error=str(exc),
+                tool_args=tool_args,
+            )
             result = {"success": False, "error": str(exc)}
 
         await self._log_tool_call(tool_name, tool_args, result)

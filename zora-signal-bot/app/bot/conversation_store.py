@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 import inspect
 
@@ -10,8 +9,9 @@ from app.config import settings
 from app.db.base import AsyncSessionLocal
 from app.db.models import ConversationSession
 from app.integrations.openai_responses_client import OpenAIResponsesClient
+from app.logging_config import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 _openai_client: OpenAIResponsesClient | None = None
 _openai_assistant_id: str | None = None

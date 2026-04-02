@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
 import httpx
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 from tenacity import AsyncRetrying
+from app.logging_config import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 ASSISTANT_TOOLS = [
     {
@@ -239,6 +239,15 @@ class OpenAIResponsesClient:
         ):
             with attempt:
                 response = await client.request(method, url, **kwargs)
+                if response.status_code >= 400:
+                    body_preview = response.text[:500]
+                    log.error(
+                        "openai_request_failed",
+                        method=method,
+                        endpoint=endpoint,
+                        status_code=response.status_code,
+                        response_body=body_preview,
+                    )
                 response.raise_for_status()
                 return response.json()
 

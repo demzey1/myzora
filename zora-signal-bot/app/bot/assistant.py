@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Any
 
 from app.bot.conversation_store import (
@@ -17,8 +16,9 @@ from app.bot.conversation_store import (
     update_conversation_timestamp,
 )
 from app.integrations.openai_responses_client import OpenAIResponsesClient
+from app.logging_config import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 MAX_POLL_ATTEMPTS = 30
 POLL_INTERVAL_SECONDS = 1
@@ -69,6 +69,8 @@ async def send_message_to_assistant(
                 messages = await client.get_thread_messages(thread_id, limit=1)
                 response_text = _extract_message_text(messages["data"][0])
                 await update_conversation_timestamp(telegram_user_id)
+                if not response_text.strip():
+                    response_text = _fallback_response(user_message)
                 return AssistantResponse(
                     text=response_text,
                     tools_executed=tools_executed_list,
@@ -103,9 +105,18 @@ async def send_message_to_assistant(
                 continue
 
             if run["status"] in ("failed", "cancelled", "expired"):
+                last_error = _format_run_error(run)
+                if last_error:
+                    log.error(
+                        "assistant_run_failed",
+                        telegram_user_id=telegram_user_id,
+                        run_status=run["status"],
+                        run_error=last_error,
+                    )
+                fallback_text = _fallback_response(user_message)
                 return AssistantResponse(
-                    text=f"Assistant run failed with status: {run['status']}",
-                    error=f"Run {run['status']}",
+                    text=fallback_text,
+                    error=last_error or f"Run {run['status']}",
                 )
 
             log.warning(f"unexpected_run_status status={run['status']} run_id={run_id}")
@@ -117,9 +128,14 @@ async def send_message_to_assistant(
         )
 
     except Exception as exc:
-        log.exception("assistant_error", telegram_user_id=telegram_user_id, exc_info=True)
+        log.exception(
+            "assistant_error",
+            telegram_user_id=telegram_user_id,
+            error=str(exc),
+            user_message=user_message,
+        )
         return AssistantResponse(
-            text="Sorry, I encountered an error. Please try again.",
+            text=_fallback_response(user_message),
             error=str(exc),
         )
 
@@ -143,8 +159,46 @@ def _extract_message_text(message: dict[str, Any]) -> str:
     content = message.get("content", [])
     for block in content:
         if block.get("type") == "text":
-            return block.get("text", "")
+            text_block = block.get("text", "")
+            if isinstance(text_block, dict):
+                return str(text_block.get("value", ""))
+            return str(text_block)
     return ""
+
+
+def _format_run_error(run: dict[str, Any]) -> str | None:
+    last_error = run.get("last_error") or {}
+    if not last_error:
+        return None
+    code = last_error.get("code")
+    message = last_error.get("message")
+    if code and message:
+        return f"{code}: {message}"
+    if message:
+        return str(message)
+    if code:
+        return str(code)
+    return None
+
+
+def _fallback_response(user_message: str) -> str:
+    text = user_message.strip().lower()
+    if text in {"hi", "hello", "hey", "yo"}:
+        return (
+            "Hi. I’m Zora Signal Bot. I can track creators, explain flagged signals, "
+            "look up Zora coins, preview trades, and help with wallet linking."
+        )
+    if "what do you do" in text or "who are you" in text or "help" == text:
+        return (
+            "I’m a Telegram trading assistant for Zora signals. I can track creators, "
+            "show recent signals, explain why a coin was flagged, look up Zora coin "
+            "market state, preview trades, and start secure wallet linking."
+        )
+    return (
+        "I’m Zora Signal Bot. I help with creator tracking, Zora signal explanation, "
+        "coin lookups, trade previews, and secure wallet linking. Try: "
+        "'track @creatorname' or 'show top signals'."
+    )
 
 
 async def _execute_tools(
