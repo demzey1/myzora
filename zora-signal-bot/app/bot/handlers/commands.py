@@ -21,7 +21,12 @@ from app.bot.inline_buttons import (
     make_status_buttons,
 )
 from app.bot.middleware import check_admin
-from app.bot.renderer import format_help, format_status, signal_inline_keyboard
+from app.bot.renderer import (
+    format_help,
+    format_recommendation_label,
+    format_status,
+    signal_inline_keyboard,
+)
 from app.config import settings
 from app.logging_config import get_logger
 
@@ -52,7 +57,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<i>Zora Signal Bot</i>\n\n"
         "A premium Telegram assistant for creator-led Zora signals and safety-gated trading.\n\n"
         "Track creators, review high-conviction setups, understand why a signal was flagged, "
-        "and move into wallet or trade flows without leaving chat.\n\n"
+        "and move into wallet or real-trade flows without leaving chat.\n\n"
+        "Live actions stay guarded behind wallet linking, previews, and confirmations.\n\n"
         "You can just type naturally or start with one of the guided actions below.",
         reply_markup=make_home_buttons(),
     )
@@ -122,9 +128,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     from app.db.repositories import SignalRepository
     from app.db.repositories.positions import PaperPositionRepository, LivePositionRepository
     async with AsyncSessionLocal() as session:
-        open_paper  = await PaperPositionRepository(session).count_open()
-        open_live   = await LivePositionRepository(session).count_open()
-        sig_today   = await SignalRepository(session).count_today()
+        open_paper = await PaperPositionRepository(session).count_open()
+        open_live = await LivePositionRepository(session).count_open()
+        sig_today = await SignalRepository(session).count_today()
     msg = format_status(
         paper_trading=context.bot_data["paper_trading"],
         live_trading=context.bot_data["live_trading"],
@@ -276,12 +282,13 @@ async def cmd_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.db.models import Recommendation
     icon = {"IGNORE":"🔇","WATCH":"👀","ALERT":"🚨",
             "PAPER_TRADE":"📝","LIVE_TRADE_READY":"⚡"}.get(sig.recommendation.value,"ℹ️")
+    decision_label = format_recommendation_label(sig.recommendation)
     await _reply(update,
         f"{icon} <b>Score result for <code>{tweet_id}</code></b>\n\n"
         f"Deterministic: <b>{sig.deterministic_score:.1f}</b>\n"
         + (f"LLM:           <b>{sig.llm_score:.1f}</b>\n" if sig.llm_score else "")
         + f"Final:         <b>{sig.final_score:.1f}</b>\n"
-        f"Decision:      <b>{sig.recommendation.value}</b>\n"
+        f"Decision:      <b>{decision_label}</b>\n"
         + (f"Risk notes:    {sig.risk_notes}" if sig.risk_notes else "")
         + f"\n<code>Signal ID: {sig.id}</code>"
     )
@@ -323,9 +330,10 @@ async def cmd_signals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for sig in signals:
         rec_icon = {"IGNORE": "🔇","WATCH": "👀","ALERT": "🚨",
                     "PAPER_TRADE": "📝","LIVE_TRADE_READY": "⚡"}.get(sig.recommendation.value, "ℹ️")
+        rec_label = format_recommendation_label(sig.recommendation)
         lines.append(
             f"{rec_icon} <code>#{sig.id}</code>  "
-            f"score=<b>{sig.final_score:.0f}</b>  {sig.recommendation.value}"
+            f"score=<b>{sig.final_score:.0f}</b>  {rec_label}"
         )
     lines.append("\nUse the buttons below to explain or review the top setup.")
     top_signal = {
@@ -343,21 +351,41 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_admin(update, context):
         return
     from app.db.base import AsyncSessionLocal
-    from app.db.repositories.positions import PaperPositionRepository
+    from app.db.repositories.positions import LivePositionRepository, PaperPositionRepository
     from app.db.repositories.coins import ZoraCoinRepository
     async with AsyncSessionLocal() as session:
-        open_pos = await PaperPositionRepository(session).get_open()
+        live_positions = await LivePositionRepository(session).get_open()
+        simulation_positions = await PaperPositionRepository(session).get_open()
         coin_repo = ZoraCoinRepository(session)
-        rows = []
-        for p in open_pos:
+        live_rows = []
+        simulation_rows = []
+        for p in live_positions:
             coin = await coin_repo.get(p.coin_id)
             sym = coin.symbol if coin else "???"
-            rows.append((p, sym))
-    if not rows:
-        await _reply(update, "📊 No open simulation positions.")
+            live_rows.append((p, sym))
+        for p in simulation_positions:
+            coin = await coin_repo.get(p.coin_id)
+            sym = coin.symbol if coin else "???"
+            simulation_rows.append((p, sym))
+    if not live_rows and not simulation_rows:
+        await _reply(update, "📊 No open live positions. No fallback simulation positions either.")
         return
-    lines = ["📊 <b>Open Positions</b>\n", "<i>Simulation positions are shown here when live positions are not open.</i>\n"]
-    for p, sym in rows:
+    lines = ["📊 <b>Open Positions</b>\n"]
+    if live_rows:
+        lines.append("<b>Live</b>")
+    for p, sym in live_rows:
+        age = _age_label(p.opened_at)
+        entry_price = f"${p.entry_price_usd:.6f}" if p.entry_price_usd is not None else "pending"
+        lines.append(
+            f"• <code>#{p.id}</code> <b>{sym}</b>  "
+            f"${p.size_usd:.0f} @ {entry_price}  [{age}]"
+        )
+    if simulation_rows:
+        if live_rows:
+            lines.append("")
+        lines.append("<b>Fallback Simulation</b>")
+        lines.append("<i>Admin-only testing path. Secondary to live execution.</i>")
+    for p, sym in simulation_rows:
         age = _age_label(p.opened_at)
         lines.append(
             f"• <code>#{p.id}</code> <b>{sym}</b>  "
@@ -375,12 +403,13 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with AsyncSessionLocal() as session:
         s = await PaperPositionRepository(session).get_pnl_summary()
     if s["total_trades"] == 0:
-        await _reply(update, "💰 No closed simulation positions yet.")
+        await _reply(update, "💰 No closed fallback simulation positions yet.")
         return
     pnl_color = "🟢" if s["total_pnl_usd"] >= 0 else "🔴"
     sign = "+" if s["total_pnl_usd"] >= 0 else ""
     msg = (
-        "💰 <b>Simulation P&amp;L</b>\n\n"
+        "💰 <b>Fallback Simulation P&amp;L</b>\n"
+        "<i>Admin-only testing summary</i>\n\n"
         f"Total trades:  <b>{s['total_trades']}</b>\n"
         f"Win / Loss:    <b>{s['winning_trades']} / {s['losing_trades']}</b>\n"
         f"Win rate:      <b>{s['win_rate_pct']:.1f}%</b>\n"
@@ -401,7 +430,11 @@ async def cmd_paper_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _bot_data_defaults(context.bot_data)
     context.bot_data["paper_trading"] = True
     log.info("paper_trading_enabled", user_id=update.effective_user.id)
-    await _reply(update, "📝 Paper trading <b>ENABLED</b>.")
+    await _reply(
+        update,
+        "📝 Fallback simulation <b>ENABLED</b>.\n"
+        "This is an admin testing path and does not change the main live-trading product flow.",
+    )
 
 
 async def cmd_paper_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -410,7 +443,7 @@ async def cmd_paper_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _bot_data_defaults(context.bot_data)
     context.bot_data["paper_trading"] = False
     log.warning("paper_trading_disabled", user_id=update.effective_user.id)
-    await _reply(update, "📝 Paper trading <b>DISABLED</b>.")
+    await _reply(update, "📝 Fallback simulation <b>DISABLED</b>.")
 
 
 async def cmd_live_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -431,7 +464,7 @@ async def cmd_live_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _reply(
         update,
         "⚡ Live trading <b>ENABLED</b>.\n"
-        "⚠️ All trades still require manual approval via /approve.",
+        "⚠️ All trades still require manual approval and configured safety gates.",
     )
 
 
@@ -463,7 +496,10 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _reply(update, "🛑 Kill switch is active — cannot approve trades.")
         return
     if not context.bot_data.get("paper_trading"):
-        await _reply(update, "⚠️ Paper trading is disabled. Use /paper_on first.")
+        await _reply(
+            update,
+            "⚠️ Fallback simulation is disabled. Use /paper_on only if you need the admin test path.",
+        )
         return
     from app.db.base import AsyncSessionLocal
     from app.trading.paper_engine import get_paper_engine
@@ -477,7 +513,10 @@ async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await session.commit()
     if result.success:
-        await _reply(update, f"✅ Paper position opened. ID: <code>{result.position_id}</code>")
+        await _reply(
+            update,
+            f"✅ Fallback simulation position opened. ID: <code>{result.position_id}</code>",
+        )
     else:
         await _reply(update, f"⛔ Could not open position: {result.message}")
 
@@ -538,11 +577,11 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg = (
         "⚙️ <b>Current Configuration</b>  (✏️ = runtime override)\n\n"
         f"Environment:           <code>{s.app_env}</code>\n"
-        f"Paper trading (cfg):   <code>{s.paper_trading_enabled}</code>\n"
-        f"Live trading (cfg):    <code>{s.live_trading_enabled}</code>\n"
+        f"Simulation fallback:   <code>{s.paper_trading_enabled}</code>\n"
+        f"Live execution:        <code>{s.live_trading_enabled}</code>\n"
         f"LLM enabled:           <code>{s.llm_enabled}</code>\n\n"
         f"<b>Trade sizing</b>\n"
-        f"  Paper size:          {_v('paper_trade_size_usd', '${:.2f}')}\n"
+        f"  Fallback sim size:   {_v('paper_trade_size_usd', '${:.2f}')}\n"
         f"  Max position:        {_v('max_position_size_usd', '${:.2f}')}\n"
         f"  Max daily loss:      {_v('max_daily_loss_usd', '${:.2f}')}\n"
         f"  Max concurrent:      {_v('max_concurrent_positions')}\n\n"
@@ -554,7 +593,7 @@ async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"  IGNORE  &lt; {s.score_ignore_threshold}\n"
         f"  WATCH   &lt; {s.score_watch_threshold}\n"
         f"  ALERT   &lt; {_v('score_alert_threshold')}\n"
-        f"  PAPER   &lt; {_v('score_paper_trade_threshold')}\n"
+        f"  REVIEW  &lt; {_v('score_paper_trade_threshold')}\n"
         f"  LIVE    ≥ {_v('score_live_trade_threshold')}\n\n"
         f"Use /setconfig &lt;key&gt; &lt;value&gt; to change at runtime."
     )
@@ -573,7 +612,7 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update,
         "🛑 <b>KILL SWITCH ACTIVATED</b>\n\n"
         "All trading halted. No new signals will be acted upon.\n"
-        "To resume: restart the bot or reset state via /paper_on.",
+        "To resume: restart the bot and explicitly re-enable the required admin modes.",
     )
 
 

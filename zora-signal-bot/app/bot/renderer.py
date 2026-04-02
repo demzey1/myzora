@@ -36,6 +36,24 @@ RECOMMENDATION_EMOJI = {
     Recommendation.LIVE_TRADE_READY: "⚡",
 }
 
+RECOMMENDATION_LABEL = {
+    Recommendation.IGNORE: "Ignore",
+    Recommendation.WATCH: "Watch",
+    Recommendation.ALERT: "Alert",
+    Recommendation.PAPER_TRADE: "Review",
+    Recommendation.LIVE_TRADE_READY: "Live Ready",
+}
+
+
+def format_recommendation_label(recommendation: Recommendation | str) -> str:
+    if isinstance(recommendation, Recommendation):
+        return RECOMMENDATION_LABEL.get(recommendation, recommendation.value.replace("_", " ").title())
+    try:
+        enum_value = Recommendation(recommendation)
+    except Exception:
+        return str(recommendation).replace("_", " ").title()
+    return RECOMMENDATION_LABEL.get(enum_value, enum_value.value.replace("_", " ").title())
+
 
 def format_signal_alert(
     *,
@@ -66,7 +84,7 @@ def format_signal_alert(
     snippet = (post_text[:200] + "…") if len(post_text) > 200 else post_text
 
     lines = [
-        f"{emoji} <b>ZORA SIGNAL — {rec.value}</b>",
+        f"{emoji} <b>ZORA SIGNAL — {format_recommendation_label(rec)}</b>",
         "",
         f"<b>Account:</b> @{x_username}",
         f"<b>Followers:</b> {followers_str}",
@@ -92,7 +110,7 @@ def format_signal_alert(
     lines += [
         f"  Final: <b>{signal.final_score:.0f}</b>",
         "",
-        f"<b>Decision:</b> {rec.value}",
+        f"<b>Decision:</b> {format_recommendation_label(rec)}",
     ]
 
     if signal.risk_notes:
@@ -126,18 +144,19 @@ def format_status(
 ) -> str:
     live_icon = "🟢" if live_trading else "🔴"
     kill_icon = "🛑" if kill_switch_active else "✅"
-    sim_text = "available" if paper_trading else "off"
+    sim_text = "available for admin fallback" if paper_trading else "off"
 
     return (
         "<b>Zora Signal Bot</b>\n"
         "<i>Premium creator-led signal and trading assistant</i>\n\n"
         f"{kill_icon} Safety state: <b>{'Locked' if kill_switch_active else 'Ready'}</b>\n"
         f"{live_icon} Live execution: <b>{'Enabled' if live_trading else 'Guarded'}</b>\n"
-        f"Simulation mode: <b>{sim_text}</b>\n\n"
+        f"Simulation fallback: <b>{sim_text}</b>\n\n"
         "<b>Today</b>\n"
         f"Signals detected: <b>{total_signals_today}</b>\n"
         f"Open live positions: <b>{open_live_positions}</b>\n"
-        f"Open simulation positions: <b>{open_paper_positions}</b>\n\n"
+        f"Fallback simulation positions: <b>{open_paper_positions}</b>\n\n"
+        "Live actions stay gated behind wallet linking, risk checks, and confirmation.\n\n"
         "Use the buttons below to move into signals, wallet, positions, or settings."
     )
 
@@ -150,7 +169,7 @@ def format_help() -> str:
         "• Track creators and watch for Zora-linked setups\n"
         "• Show top signals and explain exactly why they were flagged\n"
         "• Check coin market state and guide secure wallet linking\n"
-        "• Preview trades with safety gates before any real action\n\n"
+        "• Preview real trades with safety gates before any execution\n\n"
         "<b>Best way to use me</b>\n"
         "Just chat naturally. You do not need commands for normal use.\n\n"
         "Examples:\n"
@@ -161,7 +180,8 @@ def format_help() -> str:
         "<b>Advanced commands</b>\n"
         "<i>Secondary admin and fallback controls</i>\n"
         "<code>/signals</code>  <code>/positions</code>  <code>/config</code>  "
-        "<code>/features</code>  <code>/health</code>"
+        "<code>/features</code>  <code>/health</code>\n\n"
+        "<i>Simulation commands still exist for admin fallback testing, but they are not the main product flow.</i>"
     )
 
 
@@ -247,11 +267,11 @@ def format_creator_signal_alert(
         ]
 
     # Recommendation based on top candidate
-    rec = "WATCH"
+    rec = "Watch"
     if candidates and candidates[0].final_rank_score >= 70:
-        rec = "PAPER_TRADE"
+        rec = "Review"
     elif candidates and candidates[0].final_rank_score >= 55:
-        rec = "ALERT"
+        rec = "Alert"
 
     lines += [
         "",

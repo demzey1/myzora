@@ -5,7 +5,7 @@ Handles inline keyboard button presses (callback queries).
 Pattern: "<action>:<signal_id>"
 
 Actions:
-  approve_paper  — open a paper position for this signal
+  approve_paper  — open a fallback simulation position for this signal
   approve_live   — queue a live trade (Phase 5)
   ignore         — mark signal as rejected
   refresh        — re-fetch coin price and update message
@@ -93,7 +93,7 @@ async def _handle_approve_paper(query, context, signal_id: int, user_id: int) ->
         await query.answer("🛑 Kill switch active.", show_alert=True)
         return
     if not context.bot_data.get("paper_trading", True):
-        await query.answer("Paper trading is disabled. Use /paper_on.", show_alert=True)
+        await query.answer("Fallback simulation is disabled. Use /paper_on if needed.", show_alert=True)
         return
 
     engine = get_paper_engine()
